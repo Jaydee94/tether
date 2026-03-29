@@ -1,0 +1,14 @@
+# Kind cluster configuration for Tether local development
+# Creates a single-node cluster that exposes a host port for the API server.
+#
+# Ref: https://kind.sigs.k8s.io/docs/user/configuration/
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: tether-dev
+nodes:
+  - role: control-plane
+    # Expose the API server on a stable local port so the proxy can forward to it.
+    extraPortMappings:
+      - containerPort: 6443
+        hostPort: 6443
+        protocol: TCP
