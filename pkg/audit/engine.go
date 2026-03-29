@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,7 +36,7 @@ func NewLocalBackend(dir string) (*LocalBackend, error) {
 
 func (b *LocalBackend) Write(_ context.Context, sessionID string, data []byte) error {
 	path := filepath.Join(b.Dir, sessionID+".cast")
-	return os.WriteFile(path, data, 0640)
+	return os.WriteFile(path, data, 0600)
 }
 
 func (b *LocalBackend) Read(_ context.Context, sessionID string) ([]byte, error) {
@@ -119,9 +120,18 @@ func NewElasticBackend(endpoint, index string) *ElasticBackend {
 
 func (b *ElasticBackend) Write(ctx context.Context, sessionID string, data []byte) error {
 	url := fmt.Sprintf("%s/%s/_doc/%s", b.endpoint, b.index, sessionID)
-	body := fmt.Sprintf(`{"sessionID":%q,"cast":%q}`, sessionID, string(data))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewBufferString(body))
+	doc := struct {
+		SessionID string `json:"sessionID"`
+		Cast      string `json:"cast"`
+	}{SessionID: sessionID, Cast: string(data)}
+
+	bodyBytes, err := json.Marshal(doc)
+	if err != nil {
+		return fmt.Errorf("marshalling Elasticsearch document for session %q: %w", sessionID, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("building Elasticsearch request: %w", err)
 	}

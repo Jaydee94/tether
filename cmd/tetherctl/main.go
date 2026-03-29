@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -144,7 +146,11 @@ func newLoginCmd() *cobra.Command {
 				return fmt.Errorf("--lease is required")
 			}
 
-			token := fmt.Sprintf("tether-%s-%d", leaseName, time.Now().UnixNano())
+			rawToken := make([]byte, 32)
+			if _, err := rand.Read(rawToken); err != nil {
+				return fmt.Errorf("generating secure token: %w", err)
+			}
+			token := "tether-" + hex.EncodeToString(rawToken)
 			contextName := "tether-" + leaseName
 
 			rules := clientcmd.NewDefaultClientConfigLoadingRules()
