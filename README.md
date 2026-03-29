@@ -71,6 +71,47 @@ The operator activates the lease by creating a `ClusterRoleBinding` and schedule
 
 ## Getting Started
 
+### Local Development with Kind (recommended)
+
+The quickest way to spin up a fully working Tether environment locally is the
+included setup script.  It requires [kind](https://kind.sigs.k8s.io/),
+[kubectl](https://kubernetes.io/docs/tasks/tools/), [docker](https://docs.docker.com/get-docker/),
+and [go](https://go.dev/doc/install).
+
+```bash
+# Bootstrap a Kind cluster, install the CRD, build binaries,
+# and start the operator + proxy in the background.
+make local-setup
+# or: ./scripts/local-setup.sh
+
+# Tear everything down when you're done.
+make local-teardown
+# or: ./scripts/local-setup.sh --teardown
+```
+
+The script will:
+1. Create a Kind cluster called `tether-dev` (if one already exists with that name, it is reused — run `make local-teardown` first for a clean start)
+2. Install the `TetherLease` CRD
+3. Build the `operator`, `proxy`, and `tetherctl` binaries into `./bin/`
+4. Start the operator in the background (logs → `/tmp/tether-pids/operator.log`)
+5. Start the proxy on `:8443` in the background (logs → `/tmp/tether-pids/proxy.log`)
+6. Create a demo `TetherLease` so you can see the full lifecycle immediately
+
+After setup, follow the printed instructions to request leases and route
+`kubectl` through the proxy for a recorded session.
+
+> **Environment variables** you can override:
+> | Variable | Default | Description |
+> |---|---|---|
+> | `TETHER_CLUSTER` | `tether-dev` | Kind cluster name |
+> | `TETHER_PROXY_PORT` | `8443` | Proxy listen port |
+> | `TETHER_AUDIT_DIR` | `/tmp/tether-audit` | Local audit directory |
+> | `TETHER_TOKEN` | `tether-dev-token` | Static dev token for the proxy |
+
+---
+
+### Manual Setup
+
 ### Prerequisites
 
 - Go 1.24+
@@ -153,13 +194,15 @@ tetherctl playback --lease <session-id>
 ## Development Commands
 
 ```bash
-make build        # Build all binaries
-make test         # Run unit tests
-make test-race    # Run tests with race detector
-make vet          # Run go vet
-make fmt          # Format source code
-make lint         # Run golangci-lint (must be installed)
-make tidy         # Run go mod tidy
-make install      # Apply CRD to current cluster
-make clean        # Remove build artifacts
+make build          # Build all binaries
+make test           # Run unit tests
+make test-race      # Run tests with race detector
+make vet            # Run go vet
+make fmt            # Format source code
+make lint           # Run golangci-lint (must be installed)
+make tidy           # Run go mod tidy
+make install        # Apply CRD to current cluster
+make local-setup    # Bootstrap Kind cluster + start operator & proxy
+make local-teardown # Stop all components and delete the Kind cluster
+make clean          # Remove build artifacts
 ```

@@ -3,7 +3,7 @@ MODULE     := github.com/Jaydee94/tether
 IMAGE_TAG  ?= latest
 IMAGE_REPO ?= ghcr.io/jaydee94/tether
 
-.PHONY: all build test lint manifests docker-build docker-push clean
+.PHONY: all build test lint manifests docker-build docker-push clean local-setup local-teardown
 
 all: build
 
@@ -85,6 +85,14 @@ tidy:
 ## Clean build artifacts
 clean:
 	rm -rf $(BINARY_DIR)
+
+## Bootstrap a local Kind-based development environment (operator + proxy + demo lease)
+local-setup:
+	@bash scripts/local-setup.sh
+
+## Tear down the local Kind-based development environment
+local-teardown:
+	@bash scripts/local-setup.sh --teardown
 
 ## Show help
 help:
