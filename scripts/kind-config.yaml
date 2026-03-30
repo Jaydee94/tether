@@ -5,10 +5,9 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: tether-dev
+networking:
+  # Keep kubeconfig endpoint aligned with API server certificate SANs.
+  apiServerAddress: 127.0.0.1
+  apiServerPort: 6443
 nodes:
   - role: control-plane
-    # Expose the API server on a stable local port so the proxy can forward to it.
-    extraPortMappings:
-      - containerPort: 6443
-        hostPort: 6443
-        protocol: TCP

@@ -3,10 +3,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -16,18 +20,20 @@ import (
 
 func main() {
 	var (
-		listenAddr    string
-		targetAddr    string
-		auditDir      string
-		tlsSkipVerify bool
-		tlsCertFile   string
-		tlsKeyFile    string
+		listenAddr         string
+		targetAddr         string
+		upstreamKubeconfig string
+		auditDir           string
+		tlsSkipVerify      bool
+		tlsCertFile        string
+		tlsKeyFile         string
 	)
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.StringVar(&listenAddr, "listen", ":8443", "Address to listen on.")
 	flag.StringVar(&targetAddr, "target", "https://kubernetes.default.svc", "Kubernetes API server URL.")
+	flag.StringVar(&upstreamKubeconfig, "upstream-kubeconfig", defaultKubeconfig(), "Path to kubeconfig used for upstream API auth.")
 	flag.StringVar(&auditDir, "audit-dir", "/var/tether/audit", "Directory for local audit recordings.")
 	flag.BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip TLS verification of the upstream API server (dev only).")
 	flag.StringVar(&tlsCertFile, "tls-cert", "", "Path to TLS certificate file for the proxy listener.")
@@ -52,7 +58,13 @@ func main() {
 	}
 	validator := proxy.NewStaticValidator(tokens)
 
-	p, err := proxy.NewTetherProxy(targetAddr, backend, validator, tlsSkipVerify)
+	upstreamTransport, err := buildUpstreamTransport(targetAddr, upstreamKubeconfig, tlsSkipVerify)
+	if err != nil {
+		log.Error(err, "Failed to configure upstream API authentication")
+		os.Exit(1)
+	}
+
+	p, err := proxy.NewTetherProxy(targetAddr, backend, validator, tlsSkipVerify, upstreamTransport)
 	if err != nil {
 		log.Error(err, "Failed to create proxy")
 		os.Exit(1)
@@ -85,4 +97,34 @@ func main() {
 		log.Error(srvErr, "Server error")
 		os.Exit(1)
 	}
+}
+
+func buildUpstreamTransport(targetAddr, kubeconfig string, tlsSkipVerify bool) (http.RoundTripper, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("loading kubeconfig %q: %w", kubeconfig, err)
+	}
+
+	if targetAddr != "" {
+		cfg.Host = targetAddr
+	}
+	cfg.Insecure = tlsSkipVerify
+	if tlsSkipVerify {
+		cfg.TLSClientConfig.CAFile = ""
+		cfg.TLSClientConfig.CAData = nil
+	}
+
+	rt, err := rest.TransportFor(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("building upstream transport: %w", err)
+	}
+	return rt, nil
+}
+
+func defaultKubeconfig() string {
+	if kc := os.Getenv("KUBECONFIG"); kc != "" {
+		return kc
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".kube", "config")
 }

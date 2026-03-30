@@ -76,13 +76,13 @@ ${BOLD}TESTING AFTER SETUP${NC}
   ./bin/tetherctl request --role view --for 30m --reason "local testing"
 
   # Activate session (updates kubeconfig to route through proxy)
-  ./bin/tetherctl login --lease <lease-name> --insecure-skip-tls-verify
+  ./bin/tetherctl login --lease LEASE_NAME --proxy https://localhost:${PROXY_PORT} --token ${TETHER_TOKEN} --insecure-skip-tls-verify
 
-  # Run kubectl commands through the proxy
-  kubectl get pods -A
+  # Trigger a recordable command (exec/log are recorded)
+  kubectl logs -n kube-system deployment/coredns
 
-  # Play back a recorded session
-  ./bin/tetherctl playback --lease <lease-name> --audit-dir ${AUDIT_DIR}
+  # Play back the recorded dev session
+  ./bin/tetherctl playback --lease ${TETHER_SESSION} --audit-dir ${AUDIT_DIR}
 
 EOF
 }
@@ -95,7 +95,7 @@ check_prerequisites() {
 
   local missing=()
 
-  for cmd in kind kubectl docker go; do
+  for cmd in kind kubectl docker go openssl; do
     if command -v "$cmd" &>/dev/null; then
       log_info "$cmd found: $(command -v "$cmd")"
     else
@@ -114,6 +114,7 @@ check_prerequisites() {
         kubectl) echo "  kubectl: https://kubernetes.io/docs/tasks/tools/" ;;
         docker)  echo "  docker:  https://docs.docker.com/get-docker/" ;;
         go)      echo "  go:      https://go.dev/doc/install" ;;
+        openssl) echo "  openssl: install your distro package (e.g. apt install openssl)" ;;
       esac
     done
     exit 1
@@ -146,6 +147,15 @@ create_cluster() {
   # Set kubectl context
   kubectl config use-context "kind-${CLUSTER_NAME}"
   log_info "kubectl context set to: kind-${CLUSTER_NAME}"
+
+  # Some environments write 0.0.0.0 into kubeconfig, which is not in the
+  # API server cert SANs. Rewrite to 127.0.0.1 for local access.
+  local server
+  server="$(kubectl config view --raw -o jsonpath="{.clusters[?(@.name=='kind-${CLUSTER_NAME}')].cluster.server}")"
+  if [[ "${server}" == "https://0.0.0.0:"* ]]; then
+    kubectl config set-cluster "kind-${CLUSTER_NAME}" --server "${server/0.0.0.0/127.0.0.1}" >/dev/null
+    log_warn "Rewrote kubeconfig server from 0.0.0.0 to 127.0.0.1 for TLS compatibility"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -225,6 +235,8 @@ start_proxy() {
   mkdir -p "${AUDIT_DIR}" "${PID_DIR}"
   local pid_file="${PID_DIR}/proxy.pid"
   local log_file="${PID_DIR}/proxy.log"
+  local tls_cert_file="${PID_DIR}/proxy.crt"
+  local tls_key_file="${PID_DIR}/proxy.key"
 
   # Kill any previously started proxy
   if [[ -f "${pid_file}" ]]; then
@@ -250,12 +262,25 @@ start_proxy() {
 
   log_info "Proxying to API server: ${api_server}"
 
+  if [[ ! -f "${tls_cert_file}" || ! -f "${tls_key_file}" ]]; then
+    log_info "Generating local TLS certificate for proxy"
+    openssl req -x509 -nodes -newkey rsa:2048 \
+      -keyout "${tls_key_file}" \
+      -out "${tls_cert_file}" \
+      -days 365 \
+      -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+      >/dev/null 2>&1
+  fi
+
   TETHER_TOKEN="${TETHER_TOKEN}" \
   TETHER_SESSION_ID="${TETHER_SESSION}" \
     nohup "${REPO_ROOT}/bin/proxy" \
       --listen ":${PROXY_PORT}" \
       --target "${api_server}" \
       --tls-skip-verify \
+      --tls-cert "${tls_cert_file}" \
+      --tls-key "${tls_key_file}" \
       --audit-dir "${AUDIT_DIR}" \
       > "${log_file}" 2>&1 &
 
@@ -325,7 +350,7 @@ print_summary() {
   echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo ""
   echo -e "${BOLD}Cluster:${NC}       kind-${CLUSTER_NAME}"
-  echo -e "${BOLD}Proxy:${NC}         http://localhost:${PROXY_PORT}  (HTTP / dev mode, no TLS cert provided)"
+  echo -e "${BOLD}Proxy:${NC}         https://localhost:${PROXY_PORT}  (self-signed cert / dev mode)"
   echo -e "${BOLD}Audit dir:${NC}     ${AUDIT_DIR}"
   echo -e "${BOLD}Dev token:${NC}     ${TETHER_TOKEN}"
   echo -e "${BOLD}Operator log:${NC}  ${PID_DIR}/operator.log"
@@ -340,13 +365,13 @@ print_summary() {
   echo -e "     ./bin/tetherctl request --role view --for 30m --reason \"testing\""
   echo ""
   echo -e "  # 3. Activate session (routes kubectl through the proxy)"
-  echo -e "     ./bin/tetherctl login --lease <lease-name> --proxy http://localhost:${PROXY_PORT} --insecure-skip-tls-verify"
+  echo -e "     ./bin/tetherctl login --lease LEASE_NAME --proxy https://localhost:${PROXY_PORT} --token ${TETHER_TOKEN} --insecure-skip-tls-verify"
   echo ""
-  echo -e "  # 4. Use kubectl normally — commands are recorded"
-  echo -e "     kubectl get pods -A"
+  echo -e "  # 4. Trigger a recordable command (only pod exec/log requests are recorded)"
+  echo -e "     kubectl logs -n kube-system deployment/coredns"
   echo ""
-  echo -e "  # 5. Play back recorded session"
-  echo -e "     ./bin/tetherctl playback --lease <lease-name> --audit-dir ${AUDIT_DIR}"
+  echo -e "  # 5. Play back recorded session (dev session ID)"
+  echo -e "     ./bin/tetherctl playback --lease ${TETHER_SESSION} --audit-dir ${AUDIT_DIR}"
   echo ""
   echo -e "  # 6. Tear down when done"
   echo -e "     $0 --teardown"

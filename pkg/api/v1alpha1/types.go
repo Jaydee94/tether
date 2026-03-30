@@ -10,14 +10,14 @@ import (
 // +kubebuilder:printcolumn:name="User",type=string,JSONPath=`.spec.user`
 // +kubebuilder:printcolumn:name="Role",type=string,JSONPath=`.spec.role`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
-// +kubebuilder:printcolumn:name="Expires",type=date,JSONPath=`.status.expiresAt`
+// +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.status.expiresAt`
 
 // TetherLease is the Schema for the tetherleases API.
 type TetherLease struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec   TetherLeaseSpec   `json:"spec,omitempty"`
-	Status TetherLeaseStatus `json:"status,omitempty"`
+	Spec              TetherLeaseSpec   `json:"spec,omitempty"`
+	Status            TetherLeaseStatus `json:"status,omitempty"`
 }
 
 // TetherLeaseSpec defines the desired state of TetherLease.

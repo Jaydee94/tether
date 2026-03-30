@@ -7,18 +7,13 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/Jaydee94/tether/pkg/audit"
-)
-
-var (
-	execPattern = regexp.MustCompile(`^/api/v1/namespaces/[^/]+/pods/[^/]+/exec$`)
-	logPattern  = regexp.MustCompile(`^/api/v1/namespaces/[^/]+/pods/[^/]+/log$`)
 )
 
 // SessionValidator validates X-Tether-Token values.
@@ -32,19 +27,25 @@ type TetherProxy struct {
 	proxy     *httputil.ReverseProxy
 	backend   audit.Backend
 	validator SessionValidator
+
+	mu        sync.Mutex
+	recorders map[string]*Recorder
 }
 
 // NewTetherProxy creates a proxy that forwards to target.
-func NewTetherProxy(target string, backend audit.Backend, validator SessionValidator, tlsSkipVerify bool) (*TetherProxy, error) {
+func NewTetherProxy(target string, backend audit.Backend, validator SessionValidator, tlsSkipVerify bool, upstreamTransport http.RoundTripper) (*TetherProxy, error) {
 	u, err := url.Parse(target)
 	if err != nil {
 		return nil, fmt.Errorf("parsing target URL %q: %w", target, err)
 	}
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: tlsSkipVerify, //nolint:gosec
-		},
+	transport := upstreamTransport
+	if transport == nil {
+		transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: tlsSkipVerify, //nolint:gosec
+			},
+		}
 	}
 
 	rp := httputil.NewSingleHostReverseProxy(u)
@@ -55,6 +56,7 @@ func NewTetherProxy(target string, backend audit.Backend, validator SessionValid
 		proxy:     rp,
 		backend:   backend,
 		validator: validator,
+		recorders: map[string]*Recorder{},
 	}, nil
 }
 
@@ -65,7 +67,13 @@ func (p *TetherProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	token := r.Header.Get("X-Tether-Token")
 	if token == "" {
-		http.Error(w, "X-Tether-Token header required", http.StatusUnauthorized)
+		authz := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(authz), "bearer ") {
+			token = strings.TrimSpace(authz[len("Bearer "):])
+		}
+	}
+	if token == "" {
+		http.Error(w, "X-Tether-Token or Authorization Bearer token required", http.StatusUnauthorized)
 		return
 	}
 
@@ -77,28 +85,23 @@ func (p *TetherProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Header.Del("X-Tether-Token")
+	r.Header.Del("Authorization")
 
-	path := r.URL.Path
-	if execPattern.MatchString(path) || logPattern.MatchString(path) {
-		p.serveWithRecording(w, r, sessionID)
-		return
-	}
-
-	p.proxy.ServeHTTP(w, r)
+	p.serveWithRecording(w, r, sessionID)
 }
 
 func (p *TetherProxy) serveWithRecording(w http.ResponseWriter, r *http.Request, sessionID string) {
 	ctx := r.Context()
 	logger := log.FromContext(ctx)
 
-	title := fmt.Sprintf("tether/%s %s %s", sessionID, r.Method, r.URL.Path)
-	recorder := NewRecorder(sessionID, p.backend, title)
-
-	if err := recorder.Start(); err != nil {
-		logger.Error(err, "Failed to start recorder")
+	recorder, err := p.recorderForSession(sessionID)
+	if err != nil {
+		logger.Error(err, "Failed to initialize recorder")
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+
+	recorder.RecordOutput([]byte("\n$ " + kubectlLikeCommand(r) + "\n"))
 
 	rw := &recordingResponseWriter{
 		ResponseWriter: w,
@@ -116,6 +119,80 @@ func (p *TetherProxy) serveWithRecording(w http.ResponseWriter, r *http.Request,
 			logger.Info("Session recording saved", "sessionID", sessionID)
 		}
 	}()
+}
+
+func (p *TetherProxy) recorderForSession(sessionID string) (*Recorder, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if rec, ok := p.recorders[sessionID]; ok {
+		return rec, nil
+	}
+
+	rec := NewRecorder(sessionID, p.backend, fmt.Sprintf("tether/%s kubernetes api session", sessionID))
+	if err := rec.Start(); err != nil {
+		return nil, err
+	}
+	p.recorders[sessionID] = rec
+	return rec, nil
+}
+
+func kubectlLikeCommand(r *http.Request) string {
+	path := r.URL.Path
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+
+	// /api/v1/namespaces/{ns}/pods/{pod}/log
+	if len(parts) >= 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" && parts[4] == "pods" && parts[6] == "log" {
+		ns := parts[3]
+		pod := parts[5]
+		q := r.URL.Query()
+		cmd := fmt.Sprintf("kubectl logs -n %s pod/%s", ns, pod)
+		if container := q.Get("container"); container != "" {
+			cmd += " -c " + container
+		}
+		if q.Get("follow") == "true" {
+			cmd += " -f"
+		}
+		if prev := q.Get("previous"); prev == "true" {
+			cmd += " --previous"
+		}
+		if tail := q.Get("tailLines"); tail != "" {
+			cmd += " --tail=" + tail
+		}
+		return cmd
+	}
+
+	// /api/v1/namespaces/{ns}/pods/{pod}/exec?command=...&container=...&stdin=...&tty=...
+	if len(parts) >= 7 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" && parts[4] == "pods" && parts[6] == "exec" {
+		ns := parts[3]
+		pod := parts[5]
+		q := r.URL.Query()
+		cmd := fmt.Sprintf("kubectl exec -n %s pod/%s", ns, pod)
+		if container := q.Get("container"); container != "" {
+			cmd += " -c " + container
+		}
+		if q.Get("stdin") == "true" {
+			cmd += " -i"
+		}
+		if q.Get("tty") == "true" {
+			cmd += " -t"
+		}
+		argv := q["command"]
+		if len(argv) > 0 {
+			cmd += " -- " + strings.Join(argv, " ")
+		}
+		return cmd
+	}
+
+	if r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" {
+		return "kubectl get namespaces"
+	}
+
+	if r.Method == http.MethodGet && len(parts) == 4 && parts[0] == "api" && parts[1] == "v1" && parts[2] == "namespaces" {
+		return "kubectl get namespace " + parts[3]
+	}
+
+	return fmt.Sprintf("%s %s", r.Method, path)
 }
 
 type recordingResponseWriter struct {

@@ -32,7 +32,7 @@ spec:
           type: string
           jsonPath: .status.phase
         - name: Expires
-          type: date
+          type: string
           jsonPath: .status.expiresAt
         - name: Age
           type: date

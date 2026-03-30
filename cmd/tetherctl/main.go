@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -53,6 +53,9 @@ var tetherLeaseGVR = schema.GroupVersionResource{
 	Resource: "tetherleases",
 }
 
+var invalidNameChars = regexp.MustCompile(`[^a-z0-9-]+`)
+var repeatedDash = regexp.MustCompile(`-+`)
+
 func newRequestCmd() *cobra.Command {
 	var (
 		role     string
@@ -73,7 +76,8 @@ func newRequestCmd() *cobra.Command {
 			if duration == "" {
 				return fmt.Errorf("--for is required")
 			}
-			if _, err := time.ParseDuration(duration); err != nil {
+			leaseDuration, err := time.ParseDuration(duration)
+			if err != nil {
 				return fmt.Errorf("invalid duration %q: %w", duration, err)
 			}
 
@@ -89,7 +93,7 @@ func newRequestCmd() *cobra.Command {
 
 			user := currentUser(kubeconfig)
 			if name == "" {
-				name = fmt.Sprintf("%s-%d", user, time.Now().Unix())
+				name = autoLeaseName(user, time.Now())
 			}
 
 			lease := &unstructured.Unstructured{
@@ -115,6 +119,8 @@ func newRequestCmd() *cobra.Command {
 
 			fmt.Printf("TetherLease %q created.\n", created.GetName())
 			fmt.Printf("User: %s | Role: %s | Duration: %s\n", user, role, duration)
+			expectedExpiry := time.Now().Add(leaseDuration)
+			fmt.Printf("Expected expiry: %s (%s)\n", expectedExpiry.Format(time.RFC3339), relativeFrom(time.Now(), expectedExpiry))
 			if reason != "" {
 				fmt.Printf("Reason: %s\n", reason)
 			}
@@ -134,6 +140,7 @@ func newLoginCmd() *cobra.Command {
 	var (
 		leaseName          string
 		proxyAddr          string
+		proxyToken         string
 		insecureSkipVerify bool
 	)
 
@@ -145,12 +152,13 @@ func newLoginCmd() *cobra.Command {
 			if leaseName == "" {
 				return fmt.Errorf("--lease is required")
 			}
-
-			rawToken := make([]byte, 32)
-			if _, err := rand.Read(rawToken); err != nil {
-				return fmt.Errorf("generating secure token: %w", err)
+			if isPlaceholderLeaseName(leaseName) {
+				return fmt.Errorf("--lease appears to be a placeholder (%q). Use a real lease name, e.g. demo-kind-tether-dev-setup", leaseName)
 			}
-			token := "tether-" + hex.EncodeToString(rawToken)
+			if proxyToken == "" {
+				return fmt.Errorf("--token is required (set --token or TETHER_TOKEN)")
+			}
+
 			contextName := "tether-" + leaseName
 
 			rules := clientcmd.NewDefaultClientConfigLoadingRules()
@@ -165,7 +173,7 @@ func newLoginCmd() *cobra.Command {
 				InsecureSkipTLSVerify: insecureSkipVerify,
 			}
 			rawCfg.AuthInfos[contextName] = &clientcmdapi.AuthInfo{
-				Token: token,
+				Token: proxyToken,
 			}
 			rawCfg.Contexts[contextName] = &clientcmdapi.Context{
 				Cluster:  contextName,
@@ -178,7 +186,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Kubeconfig updated. Active context: %q\n", contextName)
-			fmt.Printf("X-Tether-Token: %s\n", token)
+			fmt.Printf("Proxy token configured: %s\n", proxyToken)
 			fmt.Println("\nYour kubectl commands are now routed through the Tether proxy.")
 			fmt.Println("The session will be recorded for audit purposes.")
 			return nil
@@ -187,6 +195,7 @@ func newLoginCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&leaseName, "lease", "", "Name of the TetherLease to activate (required)")
 	cmd.Flags().StringVar(&proxyAddr, "proxy", "https://localhost:8443", "Address of the Tether proxy")
+	cmd.Flags().StringVar(&proxyToken, "token", os.Getenv("TETHER_TOKEN"), "Proxy token (or set TETHER_TOKEN)")
 	cmd.Flags().BoolVar(&insecureSkipVerify, "insecure-skip-tls-verify", false, "Skip TLS certificate verification of the proxy (dev only)")
 	return cmd
 }
@@ -205,6 +214,9 @@ func newPlaybackCmd() *cobra.Command {
 			if leaseName == "" {
 				return fmt.Errorf("--lease is required")
 			}
+			if isPlaceholderLeaseName(leaseName) {
+				return fmt.Errorf("--lease appears to be a placeholder (%q). In local dev mode, try: --lease dev-session", leaseName)
+			}
 
 			backend, err := audit.NewLocalBackend(auditDir)
 			if err != nil {
@@ -213,6 +225,9 @@ func newPlaybackCmd() *cobra.Command {
 
 			data, err := backend.Read(context.Background(), leaseName)
 			if err != nil {
+				if os.IsNotExist(err) {
+					return playbackNotFoundError(leaseName, auditDir)
+				}
 				return fmt.Errorf("reading session %q: %w", leaseName, err)
 			}
 
@@ -240,8 +255,9 @@ func playbackCast(data []byte) error {
 		return fmt.Errorf("parsing cast header: %w", err)
 	}
 
-	fmt.Printf("Playing back: %s (recorded at %s)\n\n",
-		hdr.Title, time.Unix(hdr.Timestamp, 0).Format(time.RFC3339))
+	recordedAt := time.Unix(hdr.Timestamp, 0)
+	fmt.Printf("Playing back: %s (recorded at %s, %s)\n\n",
+		hdr.Title, recordedAt.Format(time.RFC3339), relativeFrom(time.Now(), recordedAt))
 
 	var lastTime float64
 	for _, line := range lines[1:] {
@@ -320,4 +336,97 @@ func envUser() string {
 		return u
 	}
 	return "unknown"
+}
+
+func relativeFrom(now, target time.Time) string {
+	delta := target.Sub(now).Round(time.Second)
+	if delta < 0 {
+		return fmt.Sprintf("%s ago", (-delta).String())
+	}
+	if delta == 0 {
+		return "now"
+	}
+	return fmt.Sprintf("in %s", delta.String())
+}
+
+func isPlaceholderLeaseName(name string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(name))
+	normalized = strings.Trim(normalized, "<>")
+	normalized = strings.ReplaceAll(normalized, "-", "")
+	normalized = strings.ReplaceAll(normalized, "_", "")
+	normalized = strings.ReplaceAll(normalized, " ", "")
+
+	switch normalized {
+	case "leasename", "yourleasename", "lease":
+		return true
+	default:
+		return false
+	}
+}
+
+func playbackNotFoundError(leaseName, auditDir string) error {
+	sessions, err := listRecordedSessions(auditDir)
+	if err != nil {
+		return fmt.Errorf("reading session %q: no recording found in %s", leaseName, auditDir)
+	}
+
+	if len(sessions) == 0 {
+		return fmt.Errorf("reading session %q: no recording found in %s (no .cast files present)", leaseName, auditDir)
+	}
+
+	hint := strings.Join(sessions, ", ")
+	if containsString(sessions, "dev-session") {
+		return fmt.Errorf("reading session %q: no recording found in %s. Available sessions: %s. In local dev mode, use --lease dev-session", leaseName, auditDir, hint)
+	}
+	return fmt.Errorf("reading session %q: no recording found in %s. Available sessions: %s", leaseName, auditDir, hint)
+}
+
+func listRecordedSessions(auditDir string) ([]string, error) {
+	entries, err := os.ReadDir(auditDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var sessions []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(name, ".cast") {
+			sessions = append(sessions, strings.TrimSuffix(name, ".cast"))
+		}
+	}
+	return sessions, nil
+}
+
+func containsString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
+}
+
+func autoLeaseName(user string, now time.Time) string {
+	base := strings.ToLower(strings.TrimSpace(user))
+	base = invalidNameChars.ReplaceAllString(base, "-")
+	base = repeatedDash.ReplaceAllString(base, "-")
+	base = strings.Trim(base, "-")
+	if base == "" {
+		base = "user"
+	}
+
+	// Keep enough room for separator + Unix timestamp suffix.
+	const maxBaseLen = 240
+	if len(base) > maxBaseLen {
+		base = base[:maxBaseLen]
+		base = strings.Trim(base, "-")
+		if base == "" {
+			base = "user"
+		}
+	}
+
+	return fmt.Sprintf("%s-%d", base, now.Unix())
 }
