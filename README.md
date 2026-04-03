@@ -31,9 +31,9 @@ Tether provides time-limited, audited, privileged Kubernetes access. Engineers r
 | Component | Description |
 |-----------|-------------|
 | **TetherLease CRD** | Cluster-scoped resource tracking access grants with expiry |
-| **Tether Operator** | Watches `TetherLease` objects; creates/deletes `ClusterRoleBindings`; enforces expiry |
-| **Tether Proxy** | Reverse proxy in front of the API server; validates tokens, records `exec`/`log` sessions |
-| **tetherctl** | CLI for requesting access, configuring kubeconfig, and playing back recordings |
+| **Tether Operator** | Watches `TetherLease` objects; creates/deletes `ClusterRoleBindings`; generates cryptographic session tokens stored as k8s Secrets; enforces expiry |
+| **Tether Proxy** | Reverse proxy in front of the API server; validates tokens against live k8s Secrets and TetherLease status, records all API sessions |
+| **tetherctl** | CLI for requesting access, listing/revoking leases, configuring kubeconfig (auto-fetches token), and playing back recordings |
 | **Audit Engine** | Pluggable storage: local filesystem, AWS S3, or Elasticsearch |
 
 ## TetherLease CRD Example
@@ -156,11 +156,18 @@ go run ./cmd/proxy/... --tls-cert /path/to/tls.crt --tls-key /path/to/tls.key
 # Request cluster-admin for 30 minutes
 tetherctl request --role cluster-admin --for 30m --reason "investigating outage"
 
-# Activate session (configures kubeconfig to route through proxy)
+# List all TetherLeases and their status
+tetherctl list
+
+# Activate session (auto-fetches token from k8s Secret; configures kubeconfig to route through proxy)
 tetherctl login --lease alice-1234567890
 
-# Normal kubectl commands are now proxied and recorded
+# Normal kubectl commands are now proxied and all requests are recorded
 kubectl get pods -A
+kubectl logs -n kube-system deployment/coredns
+
+# Revoke access early (operator deletes CRB and token Secret immediately)
+tetherctl revoke --lease alice-1234567890
 
 # Play back a recorded session
 tetherctl playback --lease alice-1234567890
@@ -186,10 +193,12 @@ tetherctl playback --lease <session-id>
 
 - **Least privilege**: The operator only creates bindings for the explicitly requested `ClusterRole`.
 - **Time-limited**: All access automatically expires; the operator enforces expiry via requeueing.
-- **Finalizer-based cleanup**: `ClusterRoleBindings` are always cleaned up even if the `TetherLease` is deleted.
-- **Audit trail**: All `exec` and `log` sessions are recorded before being forwarded.
-- **Token validation**: The proxy rejects requests without a valid `X-Tether-Token`; in production replace `StaticValidator` with a Kubernetes Secret-backed token store.
+- **Finalizer-based cleanup**: `ClusterRoleBindings` and session-token Secrets are always cleaned up even if the `TetherLease` is deleted.
+- **Cryptographic session tokens**: The operator generates a 32-byte cryptographically random token (base64-URL-encoded) per lease, stored as a k8s Secret in the `tether-system` namespace. The token is deleted when the lease expires or is revoked.
+- **Live token validation**: The proxy validates each request against the live k8s Secret *and* the current TetherLease phase — revoking a lease immediately invalidates all subsequent proxy requests.
+- **Audit trail**: All API requests through the proxy are recorded in Asciinema v2 format before being forwarded.
 - **TLS**: The proxy supports TLS termination; `--tls-skip-verify` is for development only.
+- **Token namespace**: Session-token Secrets are isolated in `tether-system`; restrict RBAC access to this namespace in production.
 
 ## Development Commands
 

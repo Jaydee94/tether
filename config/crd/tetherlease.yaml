@@ -82,3 +82,6 @@ spec:
                 bindingName:
                   type: string
                   description: Name of the ClusterRoleBinding created for this lease.
+                tokenSecret:
+                  type: string
+                  description: Name of the k8s Secret (in the tether namespace) that holds the session token.

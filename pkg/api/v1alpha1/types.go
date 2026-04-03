@@ -33,6 +33,8 @@ type TetherLeaseStatus struct {
 	Phase       TetherLeasePhase `json:"phase,omitempty"`
 	ExpiresAt   *metav1.Time     `json:"expiresAt,omitempty"`
 	BindingName string           `json:"bindingName,omitempty"`
+	// TokenSecret is the name of the k8s Secret in the tether namespace that holds the session token.
+	TokenSecret string `json:"tokenSecret,omitempty"`
 }
 
 // TetherLeasePhase describes the lifecycle phase of a TetherLease.
