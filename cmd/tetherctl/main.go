@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
@@ -33,7 +35,7 @@ It allows you to request time-limited access, configure kubeconfig, and play bac
 
 func main() {
 	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", defaultKubeconfig(), "Path to kubeconfig file.")
-	rootCmd.AddCommand(newRequestCmd(), newLoginCmd(), newPlaybackCmd())
+	rootCmd.AddCommand(newRequestCmd(), newLoginCmd(), newPlaybackCmd(), newListCmd(), newRevokeCmd())
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -55,6 +57,14 @@ var tetherLeaseGVR = schema.GroupVersionResource{
 
 var invalidNameChars = regexp.MustCompile(`[^a-z0-9-]+`)
 var repeatedDash = regexp.MustCompile(`-+`)
+
+// defaultTokenNamespace is where the operator stores session-token Secrets.
+func defaultTokenNamespace() string {
+	if ns := os.Getenv("TETHER_NAMESPACE"); ns != "" {
+		return ns
+	}
+	return "tether-system"
+}
 
 func newRequestCmd() *cobra.Command {
 	var (
@@ -142,6 +152,7 @@ func newLoginCmd() *cobra.Command {
 		proxyAddr          string
 		proxyToken         string
 		insecureSkipVerify bool
+		tokenNamespace     string
 	)
 
 	cmd := &cobra.Command{
@@ -155,8 +166,19 @@ func newLoginCmd() *cobra.Command {
 			if isPlaceholderLeaseName(leaseName) {
 				return fmt.Errorf("--lease appears to be a placeholder (%q). Use a real lease name, e.g. demo-kind-tether-dev-setup", leaseName)
 			}
+
+			// If no token was provided, try to fetch it from the k8s Secret created by the operator.
 			if proxyToken == "" {
-				return fmt.Errorf("--token is required (set --token or TETHER_TOKEN)")
+				fetched, err := fetchTokenFromSecret(leaseName, tokenNamespace)
+				if err != nil {
+					return fmt.Errorf("could not auto-fetch token for lease %q (pass --token to specify manually): %w", leaseName, err)
+				}
+				proxyToken = fetched
+				fmt.Printf("Token auto-fetched from Kubernetes Secret (namespace: %s).\n", tokenNamespace)
+			}
+
+			if proxyToken == "" {
+				return fmt.Errorf("--token is required (set --token or TETHER_TOKEN, or ensure the lease is Active so the token can be auto-fetched)")
 			}
 
 			contextName := "tether-" + leaseName
@@ -186,7 +208,6 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			fmt.Printf("Kubeconfig updated. Active context: %q\n", contextName)
-			fmt.Printf("Proxy token configured: %s\n", proxyToken)
 			fmt.Println("\nYour kubectl commands are now routed through the Tether proxy.")
 			fmt.Println("The session will be recorded for audit purposes.")
 			return nil
@@ -195,8 +216,145 @@ func newLoginCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&leaseName, "lease", "", "Name of the TetherLease to activate (required)")
 	cmd.Flags().StringVar(&proxyAddr, "proxy", "https://localhost:8443", "Address of the Tether proxy")
-	cmd.Flags().StringVar(&proxyToken, "token", os.Getenv("TETHER_TOKEN"), "Proxy token (or set TETHER_TOKEN)")
+	cmd.Flags().StringVar(&proxyToken, "token", os.Getenv("TETHER_TOKEN"), "Proxy token (auto-fetched from k8s if omitted; or set TETHER_TOKEN)")
 	cmd.Flags().BoolVar(&insecureSkipVerify, "insecure-skip-tls-verify", false, "Skip TLS certificate verification of the proxy (dev only)")
+	cmd.Flags().StringVar(&tokenNamespace, "token-namespace", defaultTokenNamespace(), "Namespace where the operator stores session-token Secrets")
+	return cmd
+}
+
+// fetchTokenFromSecret reads the session token from the k8s Secret that the operator created.
+func fetchTokenFromSecret(leaseName, namespace string) (string, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return "", fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	kubeClient, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return "", fmt.Errorf("creating kubernetes client: %w", err)
+	}
+	secretName := "tether-token-" + leaseName
+	secret, err := kubeClient.CoreV1().Secrets(namespace).Get(context.Background(), secretName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("reading secret %q in namespace %q: %w", secretName, namespace, err)
+	}
+	token := strings.TrimSpace(string(secret.Data["token"]))
+	if token == "" {
+		return "", fmt.Errorf("secret %q has no token data", secretName)
+	}
+	return token, nil
+}
+
+func newListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "list",
+		Short:   "List all TetherLeases",
+		Example: `  tetherctl list`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+			if err != nil {
+				return fmt.Errorf("loading kubeconfig: %w", err)
+			}
+			dynClient, err := dynamic.NewForConfig(cfg)
+			if err != nil {
+				return fmt.Errorf("creating dynamic client: %w", err)
+			}
+
+			list, err := dynClient.Resource(tetherLeaseGVR).List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				return fmt.Errorf("listing TetherLeases: %w", err)
+			}
+
+			if len(list.Items) == 0 {
+				fmt.Println("No TetherLeases found.")
+				return nil
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "NAME\tUSER\tROLE\tPHASE\tEXPIRES\tREASON")
+			fmt.Fprintln(w, "----\t----\t----\t-----\t-------\t------")
+			for i := range list.Items {
+				item := &list.Items[i]
+				name := item.GetName()
+				user, _, _ := unstructured.NestedString(item.Object, "spec", "user")
+				role, _, _ := unstructured.NestedString(item.Object, "spec", "role")
+				reason, _, _ := unstructured.NestedString(item.Object, "spec", "reason")
+				phase, _, _ := unstructured.NestedString(item.Object, "status", "phase")
+				expiresAt, _, _ := unstructured.NestedString(item.Object, "status", "expiresAt")
+
+				if phase == "" {
+					phase = "Pending"
+				}
+				if reason == "" {
+					reason = "-"
+				}
+				expiry := "-"
+				if expiresAt != "" {
+					if t, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+						if time.Now().After(t) {
+							expiry = "expired"
+						} else {
+							expiry = relativeFrom(time.Now(), t)
+						}
+					} else {
+						expiry = expiresAt
+					}
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", name, user, role, phase, expiry, reason)
+			}
+			return w.Flush()
+		},
+	}
+	return cmd
+}
+
+func newRevokeCmd() *cobra.Command {
+	var leaseName string
+
+	cmd := &cobra.Command{
+		Use:     "revoke",
+		Short:   "Revoke a TetherLease immediately",
+		Example: `  tetherctl revoke --lease alice-1234567890`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if leaseName == "" {
+				return fmt.Errorf("--lease is required")
+			}
+
+			cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+			if err != nil {
+				return fmt.Errorf("loading kubeconfig: %w", err)
+			}
+			dynClient, err := dynamic.NewForConfig(cfg)
+			if err != nil {
+				return fmt.Errorf("creating dynamic client: %w", err)
+			}
+
+			// Fetch the current lease so we can patch its status.
+			lease, err := dynClient.Resource(tetherLeaseGVR).Get(context.Background(), leaseName, metav1.GetOptions{})
+			if err != nil {
+				return fmt.Errorf("getting TetherLease %q: %w", leaseName, err)
+			}
+
+			phase, _, _ := unstructured.NestedString(lease.Object, "status", "phase")
+			if phase == "Expired" || phase == "Revoked" {
+				fmt.Printf("Lease %q is already %s.\n", leaseName, phase)
+				return nil
+			}
+
+			// Set phase to Revoked via status subresource.
+			if err := unstructured.SetNestedField(lease.Object, "Revoked", "status", "phase"); err != nil {
+				return fmt.Errorf("setting phase: %w", err)
+			}
+			if _, err := dynClient.Resource(tetherLeaseGVR).UpdateStatus(context.Background(), lease, metav1.UpdateOptions{}); err != nil {
+				return fmt.Errorf("revoking lease %q: %w", leaseName, err)
+			}
+
+			fmt.Printf("Lease %q has been revoked.\n", leaseName)
+			fmt.Println("The operator will delete the ClusterRoleBinding and session token.")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&leaseName, "lease", "", "Name of the TetherLease to revoke (required)")
 	return cmd
 }
 

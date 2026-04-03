@@ -159,6 +159,19 @@ create_cluster() {
 }
 
 # ---------------------------------------------------------------------------
+# Create tether-system namespace
+# ---------------------------------------------------------------------------
+create_namespace() {
+  log_step "Ensuring tether-system namespace exists"
+  if ! kubectl get namespace tether-system &>/dev/null; then
+    kubectl create namespace tether-system
+    log_success "Namespace 'tether-system' created"
+  else
+    log_info "Namespace 'tether-system' already exists"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Install CRD
 # ---------------------------------------------------------------------------
 install_crd() {
@@ -210,6 +223,7 @@ start_operator() {
     nohup "${REPO_ROOT}/bin/operator" \
       --metrics-bind-address ":8082" \
       --health-probe-bind-address ":8083" \
+      --token-namespace "tether-system" \
       > "${log_file}" 2>&1 &
 
   echo $! > "${pid_file}"
@@ -273,15 +287,14 @@ start_proxy() {
       >/dev/null 2>&1
   fi
 
-  TETHER_TOKEN="${TETHER_TOKEN}" \
-  TETHER_SESSION_ID="${TETHER_SESSION}" \
-    nohup "${REPO_ROOT}/bin/proxy" \
+  nohup "${REPO_ROOT}/bin/proxy" \
       --listen ":${PROXY_PORT}" \
       --target "${api_server}" \
       --tls-skip-verify \
       --tls-cert "${tls_cert_file}" \
       --tls-key "${tls_key_file}" \
       --audit-dir "${AUDIT_DIR}" \
+      --token-namespace "tether-system" \
       > "${log_file}" 2>&1 &
 
   echo $! > "${pid_file}"
@@ -349,31 +362,35 @@ print_summary() {
   echo -e "${CYAN}${BOLD}║           Tether Local Environment Ready! 🎉                ║${NC}"
   echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo ""
-  echo -e "${BOLD}Cluster:${NC}       kind-${CLUSTER_NAME}"
-  echo -e "${BOLD}Proxy:${NC}         https://localhost:${PROXY_PORT}  (self-signed cert / dev mode)"
-  echo -e "${BOLD}Audit dir:${NC}     ${AUDIT_DIR}"
-  echo -e "${BOLD}Dev token:${NC}     ${TETHER_TOKEN}"
-  echo -e "${BOLD}Operator log:${NC}  ${PID_DIR}/operator.log"
-  echo -e "${BOLD}Proxy log:${NC}     ${PID_DIR}/proxy.log"
+  echo -e "${BOLD}Cluster:${NC}         kind-${CLUSTER_NAME}"
+  echo -e "${BOLD}Proxy:${NC}           https://localhost:${PROXY_PORT}  (self-signed cert / dev mode)"
+  echo -e "${BOLD}Audit dir:${NC}       ${AUDIT_DIR}"
+  echo -e "${BOLD}Token namespace:${NC} tether-system  (operator stores session tokens here)"
+  echo -e "${BOLD}Operator log:${NC}    ${PID_DIR}/operator.log"
+  echo -e "${BOLD}Proxy log:${NC}       ${PID_DIR}/proxy.log"
   echo ""
-  echo -e "${BOLD}${BLUE}Quick-start commands:${NC}"
+  echo -e "${BOLD}${BLUE}Quick-start workflow (JIT access):${NC}"
   echo ""
-  echo -e "  # 1. Watch TetherLease status"
-  echo -e "     kubectl get tetherlease -w"
+  echo -e "  # 1. List existing leases"
+  echo -e "     ./bin/tetherctl list"
   echo ""
-  echo -e "  # 2. Request access"
+  echo -e "  # 2. Request just-in-time privileged access"
   echo -e "     ./bin/tetherctl request --role view --for 30m --reason \"testing\""
   echo ""
-  echo -e "  # 3. Activate session (routes kubectl through the proxy)"
-  echo -e "     ./bin/tetherctl login --lease LEASE_NAME --proxy https://localhost:${PROXY_PORT} --token ${TETHER_TOKEN} --insecure-skip-tls-verify"
+  echo -e "  # 3. Activate session — token is auto-fetched from k8s (no --token needed)"
+  echo -e "     ./bin/tetherctl login --lease LEASE_NAME --proxy https://localhost:${PROXY_PORT} --insecure-skip-tls-verify"
   echo ""
-  echo -e "  # 4. Trigger a recordable command (only pod exec/log requests are recorded)"
+  echo -e "  # 4. Run kubectl commands (all requests recorded, session expires automatically)"
+  echo -e "     kubectl get pods -A"
   echo -e "     kubectl logs -n kube-system deployment/coredns"
   echo ""
-  echo -e "  # 5. Play back recorded session (dev session ID)"
-  echo -e "     ./bin/tetherctl playback --lease ${TETHER_SESSION} --audit-dir ${AUDIT_DIR}"
+  echo -e "  # 5. Play back recorded session"
+  echo -e "     ./bin/tetherctl playback --lease LEASE_NAME --audit-dir ${AUDIT_DIR}"
   echo ""
-  echo -e "  # 6. Tear down when done"
+  echo -e "  # 6. Revoke access early"
+  echo -e "     ./bin/tetherctl revoke --lease LEASE_NAME"
+  echo ""
+  echo -e "  # 7. Tear down when done"
   echo -e "     $0 --teardown"
   echo ""
 }
@@ -465,6 +482,7 @@ main() {
   check_prerequisites
   create_cluster
   install_crd
+  create_namespace
   build_binaries
   start_operator
   start_proxy

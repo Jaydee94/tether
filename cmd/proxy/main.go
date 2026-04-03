@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -27,6 +29,9 @@ func main() {
 		tlsSkipVerify      bool
 		tlsCertFile        string
 		tlsKeyFile         string
+		tokenNamespace     string
+		devToken           string
+		devSessionID       string
 	)
 
 	opts := zap.Options{Development: true}
@@ -38,6 +43,10 @@ func main() {
 	flag.BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip TLS verification of the upstream API server (dev only).")
 	flag.StringVar(&tlsCertFile, "tls-cert", "", "Path to TLS certificate file for the proxy listener.")
 	flag.StringVar(&tlsKeyFile, "tls-key", "", "Path to TLS key file for the proxy listener.")
+	flag.StringVar(&tokenNamespace, "token-namespace", "tether-system", "Namespace where session-token Secrets are stored.")
+	// Dev-mode flags: if both are set, fall back to a static single-token validator (useful in CI/testing).
+	flag.StringVar(&devToken, "dev-token", os.Getenv("TETHER_TOKEN"), "Dev-only static token (overrides k8s-backed validation).")
+	flag.StringVar(&devSessionID, "dev-session-id", os.Getenv("TETHER_SESSION_ID"), "Session ID paired with --dev-token.")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -49,19 +58,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	// In production, replace StaticValidator with a real token store backed by k8s secrets.
-	token := os.Getenv("TETHER_TOKEN")
-	sessionID := os.Getenv("TETHER_SESSION_ID")
-	tokens := map[string]string{}
-	if token != "" && sessionID != "" {
-		tokens[token] = sessionID
-	}
-	validator := proxy.NewStaticValidator(tokens)
-
 	upstreamTransport, err := buildUpstreamTransport(targetAddr, upstreamKubeconfig, tlsSkipVerify)
 	if err != nil {
 		log.Error(err, "Failed to configure upstream API authentication")
 		os.Exit(1)
+	}
+
+	var validator proxy.SessionValidator
+	if devToken != "" && devSessionID != "" {
+		// Dev / CI mode: bypass k8s Secret lookup.
+		log.Info("Using static dev token validator (dev-only mode)", "sessionID", devSessionID)
+		validator = proxy.NewStaticValidator(map[string]string{devToken: devSessionID})
+	} else {
+		// Production mode: validate tokens against k8s Secrets and live TetherLease status.
+		restCfg, cfgErr := clientcmd.BuildConfigFromFlags("", upstreamKubeconfig)
+		if cfgErr != nil {
+			log.Error(cfgErr, "Failed to load kubeconfig for token validator")
+			os.Exit(1)
+		}
+		kubeClient, k8sErr := kubernetes.NewForConfig(restCfg)
+		if k8sErr != nil {
+			log.Error(k8sErr, "Failed to create Kubernetes client for token validator")
+			os.Exit(1)
+		}
+		dynClient, dynErr := dynamic.NewForConfig(restCfg)
+		if dynErr != nil {
+			log.Error(dynErr, "Failed to create dynamic client for token validator")
+			os.Exit(1)
+		}
+		log.Info("Using Kubernetes-backed lease validator", "tokenNamespace", tokenNamespace)
+		validator = proxy.NewKubernetesLeaseValidator(kubeClient, dynClient, tokenNamespace)
 	}
 
 	p, err := proxy.NewTetherProxy(targetAddr, backend, validator, tlsSkipVerify, upstreamTransport)

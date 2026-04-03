@@ -2,9 +2,12 @@ package operator
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,17 +23,29 @@ import (
 const (
 	finalizerName = "tether.dev/cleanup"
 	bindingPrefix = "tether-lease-"
+	tokenPrefix   = "tether-token-"
+
+	// LabelTokenType is applied to session-token Secrets.
+	LabelTokenType = "tether.dev/type"
+	// LabelTokenLease links a token Secret to its TetherLease.
+	LabelTokenLease = "tether.dev/lease"
+	// TokenSecretType is the value of LabelTokenType for session tokens.
+	TokenSecretType = "session-token"
+	// TokenDataKey is the key inside the Secret's data map that holds the raw token.
+	TokenDataKey = "token"
 )
 
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases/finalizers,verbs=update
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterrolebindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
 
 // TetherLeaseReconciler reconciles TetherLease objects.
 type TetherLeaseReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme         *runtime.Scheme
+	TokenNamespace string // namespace in which session-token Secrets are stored
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -98,16 +113,28 @@ func (r *TetherLeaseReconciler) activateLease(ctx context.Context, lease *tether
 		return ctrl.Result{}, err
 	}
 
+	// Generate and store a session token.
+	secretName := tokenPrefix + lease.Name
+	token, err := generateSessionToken()
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("generating session token: %w", err)
+	}
 	expiresAt := metav1.NewTime(time.Now().Add(duration))
+	tokenSecret := r.buildTokenSecret(lease, secretName, token, expiresAt.Time)
+	if err := r.createOrUpdateSecret(ctx, tokenSecret); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	lease.Status.Phase = tetherv1alpha1.PhaseActive
 	lease.Status.ExpiresAt = &expiresAt
 	lease.Status.BindingName = bindingName
+	lease.Status.TokenSecret = secretName
 
 	if err := r.Status().Update(ctx, lease); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Lease activated", "lease", lease.Name, "expiresAt", expiresAt.Time)
+	logger.Info("Lease activated", "lease", lease.Name, "expiresAt", expiresAt.Time, "tokenSecret", secretName)
 	return ctrl.Result{RequeueAfter: duration}, nil
 }
 
@@ -136,7 +163,11 @@ func (r *TetherLeaseReconciler) expireLease(ctx context.Context, lease *tetherv1
 	if err := r.deleteClusterRoleBinding(ctx, lease.Status.BindingName); err != nil {
 		return ctrl.Result{}, err
 	}
+	if err := r.deleteTokenSecret(ctx, lease.Status.TokenSecret); err != nil {
+		return ctrl.Result{}, err
+	}
 	lease.Status.Phase = tetherv1alpha1.PhaseExpired
+	lease.Status.TokenSecret = ""
 	if err := r.Status().Update(ctx, lease); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -149,9 +180,15 @@ func (r *TetherLeaseReconciler) handleRevoked(ctx context.Context, lease *tether
 			return ctrl.Result{}, err
 		}
 		lease.Status.BindingName = ""
-		if err := r.Status().Update(ctx, lease); err != nil {
+	}
+	if lease.Status.TokenSecret != "" {
+		if err := r.deleteTokenSecret(ctx, lease.Status.TokenSecret); err != nil {
 			return ctrl.Result{}, err
 		}
+		lease.Status.TokenSecret = ""
+	}
+	if err := r.Status().Update(ctx, lease); err != nil {
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
@@ -165,12 +202,80 @@ func (r *TetherLeaseReconciler) handleDeletion(ctx context.Context, lease *tethe
 				return ctrl.Result{}, err
 			}
 		}
+		if lease.Status.TokenSecret != "" {
+			logger.Info("Deleting token Secret during lease cleanup", "secret", lease.Status.TokenSecret)
+			if err := r.deleteTokenSecret(ctx, lease.Status.TokenSecret); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 		controllerutil.RemoveFinalizer(lease, finalizerName)
 		if err := r.Update(ctx, lease); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *TetherLeaseReconciler) createOrUpdateClusterRoleBinding(ctx context.Context, crb *rbacv1.ClusterRoleBinding) error {
+	existing := &rbacv1.ClusterRoleBinding{}
+	err := r.Get(ctx, client.ObjectKey{Name: crb.Name}, existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, crb)
+	}
+	if err != nil {
+		return err
+	}
+	existing.RoleRef = crb.RoleRef
+	existing.Subjects = crb.Subjects
+	existing.Labels = crb.Labels
+	existing.Annotations = crb.Annotations
+	return r.Update(ctx, existing)
+}
+
+func (r *TetherLeaseReconciler) createOrUpdateSecret(ctx context.Context, secret *corev1.Secret) error {
+	existing := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: secret.Name, Namespace: secret.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return r.Create(ctx, secret)
+	}
+	if err != nil {
+		return err
+	}
+	existing.Data = secret.Data
+	existing.Labels = secret.Labels
+	existing.Annotations = secret.Annotations
+	return r.Update(ctx, existing)
+}
+
+func (r *TetherLeaseReconciler) deleteClusterRoleBinding(ctx context.Context, name string) error {
+	if name == "" {
+		return nil
+	}
+	crb := &rbacv1.ClusterRoleBinding{}
+	err := r.Get(ctx, client.ObjectKey{Name: name}, crb)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting ClusterRoleBinding %s: %w", name, err)
+	}
+	return r.Delete(ctx, crb)
+}
+
+func (r *TetherLeaseReconciler) deleteTokenSecret(ctx context.Context, name string) error {
+	if name == "" {
+		return nil
+	}
+	ns := r.tokenNamespace()
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: ns}, secret)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting token Secret %s/%s: %w", ns, name, err)
+	}
+	return r.Delete(ctx, secret)
 }
 
 func (r *TetherLeaseReconciler) buildClusterRoleBinding(lease *tetherv1alpha1.TetherLease, name string) *rbacv1.ClusterRoleBinding {
@@ -201,33 +306,43 @@ func (r *TetherLeaseReconciler) buildClusterRoleBinding(lease *tetherv1alpha1.Te
 	}
 }
 
-func (r *TetherLeaseReconciler) createOrUpdateClusterRoleBinding(ctx context.Context, crb *rbacv1.ClusterRoleBinding) error {
-	existing := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, client.ObjectKey{Name: crb.Name}, existing)
-	if errors.IsNotFound(err) {
-		return r.Create(ctx, crb)
+func (r *TetherLeaseReconciler) buildTokenSecret(lease *tetherv1alpha1.TetherLease, name, token string, expiresAt time.Time) *corev1.Secret {
+	ns := r.tokenNamespace()
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels: map[string]string{
+				LabelTokenType:               TokenSecretType,
+				LabelTokenLease:              lease.Name,
+				"app.kubernetes.io/managed-by": "tether",
+			},
+			Annotations: map[string]string{
+				"tether.dev/user":       lease.Spec.User,
+				"tether.dev/role":       lease.Spec.Role,
+				"tether.dev/reason":     lease.Spec.Reason,
+				"tether.dev/expires-at": expiresAt.UTC().Format(time.RFC3339),
+			},
+		},
+		Type: corev1.SecretTypeOpaque,
+		Data: map[string][]byte{
+			TokenDataKey: []byte(token),
+		},
 	}
-	if err != nil {
-		return err
-	}
-	existing.RoleRef = crb.RoleRef
-	existing.Subjects = crb.Subjects
-	existing.Labels = crb.Labels
-	existing.Annotations = crb.Annotations
-	return r.Update(ctx, existing)
 }
 
-func (r *TetherLeaseReconciler) deleteClusterRoleBinding(ctx context.Context, name string) error {
-	if name == "" {
-		return nil
+func (r *TetherLeaseReconciler) tokenNamespace() string {
+	if r.TokenNamespace != "" {
+		return r.TokenNamespace
 	}
-	crb := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, client.ObjectKey{Name: name}, crb)
-	if errors.IsNotFound(err) {
-		return nil
+	return "tether-system"
+}
+
+// generateSessionToken creates a cryptographically random 32-byte URL-safe base64 token.
+func generateSessionToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("reading random bytes: %w", err)
 	}
-	if err != nil {
-		return fmt.Errorf("getting ClusterRoleBinding %s: %w", name, err)
-	}
-	return r.Delete(ctx, crb)
+	return base64.URLEncoding.EncodeToString(b), nil
 }
