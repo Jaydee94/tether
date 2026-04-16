@@ -30,7 +30,8 @@ type TetherLeaseSpec struct {
 	// that namespace instead of a ClusterRoleBinding, reducing blast radius to a single namespace.
 	// When empty (default), a ClusterRoleBinding is created (existing behaviour).
 	// +optional
-	Namespace string `json:"namespace,omitempty"`
+	Namespace string   `json:"namespace,omitempty"`
+	Approvers []string `json:"approvers,omitempty"`
 }
 
 // TetherLeaseStatus defines the observed state of TetherLease.
@@ -39,17 +40,46 @@ type TetherLeaseStatus struct {
 	ExpiresAt   *metav1.Time     `json:"expiresAt,omitempty"`
 	BindingName string           `json:"bindingName,omitempty"`
 	// TokenSecret is the name of the k8s Secret in the tether namespace that holds the session token.
-	TokenSecret string `json:"tokenSecret,omitempty"`
+	TokenSecret        string `json:"tokenSecret,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	ApprovedBy         string `json:"approvedBy,omitempty"`
+	DeniedBy           string `json:"deniedBy,omitempty"`
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // TetherLeasePhase describes the lifecycle phase of a TetherLease.
 type TetherLeasePhase string
 
 const (
-	PhasePending TetherLeasePhase = "Pending"
-	PhaseActive  TetherLeasePhase = "Active"
-	PhaseExpired TetherLeasePhase = "Expired"
-	PhaseRevoked TetherLeasePhase = "Revoked"
+	PhasePending         TetherLeasePhase = "Pending"
+	PhasePendingApproval TetherLeasePhase = "PendingApproval"
+	PhaseActive          TetherLeasePhase = "Active"
+	PhaseExpired         TetherLeasePhase = "Expired"
+	PhaseRevoked         TetherLeasePhase = "Revoked"
+	PhaseDenied          TetherLeasePhase = "Denied"
+)
+
+const (
+	ConditionReady = "Ready"
+)
+
+const (
+	ReasonActivated        = "Activated"
+	ReasonInvalidRole      = "InvalidRole"
+	ReasonInvalidUser      = "InvalidUser"
+	ReasonInvalidDuration  = "InvalidDuration"
+	ReasonDurationTooShort = "DurationTooShort"
+	ReasonDurationTooLong  = "DurationTooLong"
+	ReasonActivationFailed = "ActivationFailed"
+	ReasonExpired          = "Expired"
+	ReasonRevoked          = "Revoked"
+	ReasonPendingApproval  = "PendingApproval"
+	ReasonApproved         = "Approved"
+	ReasonDenied           = "Denied"
 )
 
 // +kubebuilder:object:root=true

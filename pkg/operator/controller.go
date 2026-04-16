@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -88,11 +89,13 @@ func (r *TetherLeaseReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	case "", tetherv1alpha1.PhasePending:
 		logger.Info("Activating lease", "lease", lease.Name, "user", lease.Spec.User, "role", lease.Spec.Role)
 		return r.activateLease(ctx, lease)
+	case tetherv1alpha1.PhasePendingApproval:
+		return r.reconcilePendingApproval(ctx, lease)
 	case tetherv1alpha1.PhaseActive:
 		return r.reconcileActive(ctx, lease)
 	case tetherv1alpha1.PhaseRevoked:
 		return r.handleRevoked(ctx, lease)
-	case tetherv1alpha1.PhaseExpired:
+	case tetherv1alpha1.PhaseExpired, tetherv1alpha1.PhaseDenied:
 		return ctrl.Result{}, nil
 	}
 
@@ -101,6 +104,18 @@ func (r *TetherLeaseReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 func (r *TetherLeaseReconciler) activateLease(ctx context.Context, lease *tetherv1alpha1.TetherLease) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// If approvers are configured AND not yet approved, gate the lease into PendingApproval.
+	if len(lease.Spec.Approvers) > 0 && lease.Status.ApprovedBy == "" {
+		message := fmt.Sprintf("waiting for approval from: %s", strings.Join(lease.Spec.Approvers, ", "))
+		logger.Info("Lease requires approval, holding in PendingApproval", "approvers", lease.Spec.Approvers)
+		lease.Status.Phase = tetherv1alpha1.PhasePendingApproval
+		if err := r.Status().Update(ctx, lease); err != nil {
+			return ctrl.Result{}, err
+		}
+		logger.Info("Lease transitioned to PendingApproval", "message", message)
+		return ctrl.Result{}, nil
+	}
 
 	duration, err := time.ParseDuration(lease.Spec.Duration)
 	if err != nil {
@@ -144,6 +159,33 @@ func (r *TetherLeaseReconciler) activateLease(ctx context.Context, lease *tether
 
 	logger.Info("Lease activated", "lease", lease.Name, "expiresAt", expiresAt.Time, "tokenSecret", secretName)
 	return ctrl.Result{RequeueAfter: duration}, nil
+}
+
+
+// reconcilePendingApproval watches for an approver to set status.approvedBy or status.deniedBy.
+func (r *TetherLeaseReconciler) reconcilePendingApproval(ctx context.Context, lease *tetherv1alpha1.TetherLease) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if lease.Status.DeniedBy != "" {
+		logger.Info("Lease denied", "deniedBy", lease.Status.DeniedBy)
+		lease.Status.Phase = tetherv1alpha1.PhaseDenied
+		if err := r.Status().Update(ctx, lease); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
+	if lease.Status.ApprovedBy != "" {
+		logger.Info("Lease approved, resetting to Pending for activation", "approvedBy", lease.Status.ApprovedBy)
+		lease.Status.Phase = tetherv1alpha1.PhasePending
+		if err := r.Status().Update(ctx, lease); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	// Still waiting - requeue after 30 seconds to poll.
+	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
 func (r *TetherLeaseReconciler) reconcileActive(ctx context.Context, lease *tetherv1alpha1.TetherLease) (ctrl.Result, error) {

@@ -281,3 +281,168 @@ func TestGenerateSessionToken(t *testing.T) {
 		t.Error("expected tokens to be unique")
 	}
 }
+
+// ---- Approval workflow tests ----
+
+func TestReconcile_PendingWithApprovers_GoesToPendingApproval(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	lease := &tetherv1alpha1.TetherLease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "approval-lease",
+			Generation: 1,
+		},
+		Spec: tetherv1alpha1.TetherLeaseSpec{
+			User:      "carol",
+			Role:      "view",
+			Duration:  "30m",
+			Approvers: []string{"alice", "bob"},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(lease).WithObjects(lease).Build()
+	r := &TetherLeaseReconciler{Client: cl, Scheme: scheme, TokenNamespace: "tether-system"}
+
+	// First reconcile: adds finalizer
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "approval-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+
+	// Second reconcile: should gate to PendingApproval
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "approval-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+
+	updated := &tetherv1alpha1.TetherLease{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "approval-lease"}, updated); err != nil {
+		t.Fatalf("getting lease: %v", err)
+	}
+	if updated.Status.Phase != tetherv1alpha1.PhasePendingApproval {
+		t.Errorf("expected PendingApproval, got %q", updated.Status.Phase)
+	}
+}
+
+func TestReconcile_PendingApproval_ApprovedActivatesLease(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	lease := &tetherv1alpha1.TetherLease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "approved-lease",
+			Generation: 1,
+			Finalizers: []string{finalizerName},
+		},
+		Spec: tetherv1alpha1.TetherLeaseSpec{
+			User:      "carol",
+			Role:      "view",
+			Duration:  "30m",
+			Approvers: []string{"alice"},
+		},
+		Status: tetherv1alpha1.TetherLeaseStatus{
+			Phase:      tetherv1alpha1.PhasePendingApproval,
+			ApprovedBy: "alice",
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(lease).WithObjects(lease).Build()
+	r := &TetherLeaseReconciler{Client: cl, Scheme: scheme, TokenNamespace: "tether-system"}
+
+	// First reconcile from PendingApproval: sees ApprovedBy, resets to Pending
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "approved-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+
+	// Second reconcile: should now activate (ApprovedBy is set, skips approver gate)
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "approved-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+
+	updated := &tetherv1alpha1.TetherLease{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "approved-lease"}, updated); err != nil {
+		t.Fatalf("getting lease: %v", err)
+	}
+	if updated.Status.Phase != tetherv1alpha1.PhaseActive {
+		t.Errorf("expected Active, got %q", updated.Status.Phase)
+	}
+	if updated.Status.ExpiresAt == nil {
+		t.Error("expected ExpiresAt to be set")
+	}
+}
+
+func TestReconcile_PendingApproval_DeniedLease(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	lease := &tetherv1alpha1.TetherLease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "denied-lease",
+			Generation: 1,
+			Finalizers: []string{finalizerName},
+		},
+		Spec: tetherv1alpha1.TetherLeaseSpec{
+			User:      "carol",
+			Role:      "view",
+			Duration:  "30m",
+			Approvers: []string{"alice"},
+		},
+		Status: tetherv1alpha1.TetherLeaseStatus{
+			Phase:    tetherv1alpha1.PhasePendingApproval,
+			DeniedBy: "alice",
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(lease).WithObjects(lease).Build()
+	r := &TetherLeaseReconciler{Client: cl, Scheme: scheme, TokenNamespace: "tether-system"}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "denied-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	updated := &tetherv1alpha1.TetherLease{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "denied-lease"}, updated); err != nil {
+		t.Fatalf("getting lease: %v", err)
+	}
+	if updated.Status.Phase != tetherv1alpha1.PhaseDenied {
+		t.Errorf("expected Denied, got %q", updated.Status.Phase)
+	}
+}
+
+func TestReconcile_PendingApproval_HoldsUntilActed(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	lease := &tetherv1alpha1.TetherLease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "waiting-lease",
+			Generation: 1,
+			Finalizers: []string{finalizerName},
+		},
+		Spec: tetherv1alpha1.TetherLeaseSpec{
+			User:      "carol",
+			Role:      "view",
+			Duration:  "30m",
+			Approvers: []string{"alice"},
+		},
+		Status: tetherv1alpha1.TetherLeaseStatus{
+			Phase: tetherv1alpha1.PhasePendingApproval,
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(lease).WithObjects(lease).Build()
+	r := &TetherLeaseReconciler{Client: cl, Scheme: scheme, TokenNamespace: "tether-system"}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "waiting-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	updated := &tetherv1alpha1.TetherLease{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "waiting-lease"}, updated); err != nil {
+		t.Fatalf("getting lease: %v", err)
+	}
+	if updated.Status.Phase != tetherv1alpha1.PhasePendingApproval {
+		t.Errorf("expected PendingApproval, got %q", updated.Status.Phase)
+	}
+}
