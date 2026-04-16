@@ -26,6 +26,11 @@ type TetherLeaseSpec struct {
 	Role     string `json:"role"`
 	Duration string `json:"duration"`
 	Reason   string `json:"reason,omitempty"`
+	// Namespace is the target namespace for a RoleBinding. When set, a RoleBinding is created in
+	// that namespace instead of a ClusterRoleBinding, reducing blast radius to a single namespace.
+	// When empty (default), a ClusterRoleBinding is created (existing behaviour).
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // TetherLeaseStatus defines the observed state of TetherLease.

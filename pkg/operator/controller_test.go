@@ -205,6 +205,65 @@ func TestReconcile_Revoked(t *testing.T) {
 	}
 }
 
+func TestReconcile_NamespaceScoped_RoleBinding(t *testing.T) {
+	scheme := newTestScheme(t)
+
+	lease := &tetherv1alpha1.TetherLease{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ns-lease",
+		},
+		Spec: tetherv1alpha1.TetherLeaseSpec{
+			User:      "dave",
+			Role:      "developer",
+			Duration:  "30m",
+			Reason:    "deploying hotfix",
+			Namespace: "dev",
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(lease).WithObjects(lease).Build()
+	r := &TetherLeaseReconciler{Client: cl, Scheme: scheme, TokenNamespace: "tether-system"}
+
+	// First reconcile: adds finalizer
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "ns-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+
+	// Second reconcile: activates lease
+	_, err = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "ns-lease"}})
+	if err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+
+	updated := &tetherv1alpha1.TetherLease{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "ns-lease"}, updated); err != nil {
+		t.Fatalf("getting lease: %v", err)
+	}
+	if updated.Status.Phase != tetherv1alpha1.PhaseActive {
+		t.Errorf("expected Active, got %q", updated.Status.Phase)
+	}
+
+	// A RoleBinding should exist in the 'dev' namespace.
+	rb := &rbacv1.RoleBinding{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: bindingPrefix + "ns-lease", Namespace: "dev"}, rb); err != nil {
+		t.Fatalf("getting RoleBinding: %v", err)
+	}
+	if rb.Subjects[0].Name != "dave" {
+		t.Errorf("expected subject dave, got %q", rb.Subjects[0].Name)
+	}
+	if rb.RoleRef.Name != "developer" {
+		t.Errorf("expected roleRef developer, got %q", rb.RoleRef.Name)
+	}
+
+	// A ClusterRoleBinding should NOT exist.
+	crb := &rbacv1.ClusterRoleBinding{}
+	err = cl.Get(context.Background(), types.NamespacedName{Name: bindingPrefix + "ns-lease"}, crb)
+	if err == nil {
+		t.Error("expected no ClusterRoleBinding for a namespace-scoped lease")
+	}
+}
+
 func TestGenerateSessionToken(t *testing.T) {
 	tok1, err := generateSessionToken()
 	if err != nil {

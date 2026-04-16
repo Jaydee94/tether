@@ -68,17 +68,21 @@ func defaultTokenNamespace() string {
 
 func newRequestCmd() *cobra.Command {
 	var (
-		role     string
-		duration string
-		reason   string
-		name     string
+		role      string
+		duration  string
+		reason    string
+		name      string
+		namespace string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "request",
 		Short: "Request a new TetherLease for privileged access",
 		Example: `  # Request cluster-admin access for 30 minutes
-  tetherctl request --role cluster-admin --for 30m --reason "investigating outage"`,
+  tetherctl request --role cluster-admin --for 30m --reason "investigating outage"
+
+  # Request namespace-scoped access (creates a RoleBinding in 'dev')
+  tetherctl request --role developer --for 1h --namespace dev --reason "deploying hotfix"`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if role == "" {
 				return fmt.Errorf("--role is required")
@@ -106,6 +110,16 @@ func newRequestCmd() *cobra.Command {
 				name = autoLeaseName(user, time.Now())
 			}
 
+			spec := map[string]interface{}{
+				"user":     user,
+				"role":     role,
+				"duration": duration,
+				"reason":   reason,
+			}
+			if namespace != "" {
+				spec["namespace"] = namespace
+			}
+
 			lease := &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"apiVersion": "tether.dev/v1alpha1",
@@ -113,12 +127,7 @@ func newRequestCmd() *cobra.Command {
 					"metadata": map[string]interface{}{
 						"name": name,
 					},
-					"spec": map[string]interface{}{
-						"user":     user,
-						"role":     role,
-						"duration": duration,
-						"reason":   reason,
-					},
+					"spec": spec,
 				},
 			}
 
@@ -129,6 +138,11 @@ func newRequestCmd() *cobra.Command {
 
 			fmt.Printf("TetherLease %q created.\n", created.GetName())
 			fmt.Printf("User: %s | Role: %s | Duration: %s\n", user, role, duration)
+			if namespace != "" {
+				fmt.Printf("Scope: namespace %q (RoleBinding)\n", namespace)
+			} else {
+				fmt.Println("Scope: cluster-wide (ClusterRoleBinding)")
+			}
 			expectedExpiry := time.Now().Add(leaseDuration)
 			fmt.Printf("Expected expiry: %s (%s)\n", expectedExpiry.Format(time.RFC3339), relativeFrom(time.Now(), expectedExpiry))
 			if reason != "" {
@@ -143,6 +157,7 @@ func newRequestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&duration, "for", "", "Duration for the lease, e.g. 30m, 1h (required)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Human-readable reason for the access request")
 	cmd.Flags().StringVar(&name, "name", "", "Name for the TetherLease (defaults to <user>-<timestamp>)")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "Namespace to scope the binding to (omit for cluster-wide ClusterRoleBinding)")
 	return cmd
 }
 
