@@ -57,13 +57,13 @@ spec:
               properties:
                 user:
                   type: string
-                  description: Kubernetes user or service account to grant access to.
+                  description: Kubernetes principal to grant access to. Must not be a reserved or system principal (for example values prefixed with system:).
                 role:
                   type: string
-                  description: ClusterRole to bind to the user.
+                  description: ClusterRole to bind to the user. Must be one of view, edit, admin, cluster-admin, or match tether-<name>.
                 duration:
                   type: string
-                  description: Duration for which access is granted (e.g. "1h", "30m").
+                  description: Duration for which access is granted. Validation accepts a single Go duration segment (for example "30m", "1h", "45s") and controller policy enforces a minimum of 1m and maximum of 8h.
                   pattern: '^[0-9]+(ns|us|µs|ms|s|m|h)$'
                 reason:
                   type: string
@@ -74,7 +74,7 @@ spec:
                 phase:
                   type: string
                   enum: [Pending, Active, Expired, Revoked]
-                  description: Current lifecycle phase of the lease.
+                  description: Current lifecycle phase of the lease set by the operator.
                 expiresAt:
                   type: string
                   format: date-time
@@ -82,6 +82,38 @@ spec:
                 bindingName:
                   type: string
                   description: Name of the ClusterRoleBinding created for this lease.
-                tokenSecret:
-                  type: string
-                  description: Name of the k8s Secret (in the tether namespace) that holds the session token.
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: Most recent metadata.generation observed by the controller during status reconciliation.
+                conditions:
+                  type: array
+                  description: Standard Kubernetes conditions for the lease. The controller maintains a Ready condition with reasons such as Activated, InvalidRole, InvalidUser, InvalidDuration, DurationTooShort, DurationTooLong, ActivationFailed, Expired, and Revoked.
+                  x-kubernetes-list-map-keys:
+                    - type
+                  x-kubernetes-list-type: map
+                  items:
+                    type: object
+                    required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                        description: Programmatic reason for the condition transition.
+                      message:
+                        type: string
+                        description: Human-readable details for the current condition state.

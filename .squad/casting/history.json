@@ -1,0 +1,22 @@
+{
+  "universe_usage_history": [
+    {
+      "universe": "Alien",
+      "used_at": "2026-04-06",
+      "assignment_id": "2026-04-06-initial-team"
+    }
+  ],
+  "assignment_cast_snapshots": {
+    "2026-04-06-initial-team": {
+      "universe": "Alien",
+      "assigned_at": "2026-04-06",
+      "members": {
+        "lead": "Ripley",
+        "operator": "Bishop",
+        "backend": "Hicks",
+        "security": "Vasquez",
+        "tester": "Hudson"
+      }
+    }
+  }
+}

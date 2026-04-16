@@ -11,3 +11,6 @@ networking:
   apiServerPort: 6443
 nodes:
   - role: control-plane
+    extraMounts:
+      - hostPath: /tmp/tether-audit
+        containerPath: /tmp/tether-audit

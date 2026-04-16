@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -23,6 +24,7 @@ import (
 func main() {
 	var (
 		listenAddr         string
+		metricsAddr        string
 		targetAddr         string
 		upstreamKubeconfig string
 		auditDir           string
@@ -39,6 +41,7 @@ func main() {
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.StringVar(&listenAddr, "listen", ":8443", "Address to listen on.")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9090", "Address to serve Prometheus metrics on.")
 	flag.StringVar(&targetAddr, "target", "https://kubernetes.default.svc", "Kubernetes API server URL.")
 	flag.StringVar(&upstreamKubeconfig, "upstream-kubeconfig", defaultKubeconfig(), "Path to kubeconfig used for upstream API auth.")
 	flag.StringVar(&auditDir, "audit-dir", "/var/tether/audit", "Directory for local audit recordings.")
@@ -110,10 +113,26 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
+	// Start metrics server
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsSrv := &http.Server{
+		Addr:              metricsAddr,
+		Handler:           metricsMux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		log.Info("Metrics server starting", "addr", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error(err, "Metrics server error")
+		}
+	}()
+
 	go func() {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		_ = metricsSrv.Shutdown(shutCtx)
 		_ = srv.Shutdown(shutCtx)
 	}()
 

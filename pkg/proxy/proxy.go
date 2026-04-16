@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -143,6 +144,7 @@ func NewTetherProxy(target string, backend audit.Backend, validator SessionValid
 func (p *TetherProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	logger := log.FromContext(ctx)
+	start := time.Now()
 
 	token := r.Header.Get("X-Tether-Token")
 	if token == "" {
@@ -152,6 +154,8 @@ func (p *TetherProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if token == "" {
+		proxyRequestsTotal.WithLabelValues("401").Inc()
+		proxyRequestDuration.Observe(time.Since(start).Seconds())
 		http.Error(w, "X-Tether-Token or Authorization Bearer token required", http.StatusUnauthorized)
 		return
 	}
@@ -159,6 +163,9 @@ func (p *TetherProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	sessionID, err := p.validator.Validate(ctx, token)
 	if err != nil {
 		logger.Info("Token validation failed", "error", err)
+		tokenValidationErrors.Inc()
+		proxyRequestsTotal.WithLabelValues("401").Inc()
+		proxyRequestDuration.Observe(time.Since(start).Seconds())
 		http.Error(w, "invalid or expired token", http.StatusUnauthorized)
 		return
 	}
@@ -166,16 +173,18 @@ func (p *TetherProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("X-Tether-Token")
 	r.Header.Del("Authorization")
 
-	p.serveWithRecording(w, r, sessionID)
+	p.serveWithRecording(w, r, sessionID, start)
 }
 
-func (p *TetherProxy) serveWithRecording(w http.ResponseWriter, r *http.Request, sessionID string) {
+func (p *TetherProxy) serveWithRecording(w http.ResponseWriter, r *http.Request, sessionID string, start time.Time) {
 	ctx := r.Context()
 	logger := log.FromContext(ctx)
 
 	recorder, err := p.recorderForSession(sessionID)
 	if err != nil {
 		logger.Error(err, "Failed to initialize recorder")
+		proxyRequestsTotal.WithLabelValues("500").Inc()
+		proxyRequestDuration.Observe(time.Since(start).Seconds())
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
@@ -185,9 +194,13 @@ func (p *TetherProxy) serveWithRecording(w http.ResponseWriter, r *http.Request,
 	rw := &recordingResponseWriter{
 		ResponseWriter: w,
 		recorder:       recorder,
+		statusCode:     http.StatusOK,
 	}
 
 	p.proxy.ServeHTTP(rw, r)
+
+	proxyRequestsTotal.WithLabelValues(strconv.Itoa(rw.statusCode)).Inc()
+	proxyRequestDuration.Observe(time.Since(start).Seconds())
 }
 
 func (p *TetherProxy) recorderForSession(sessionID string) (*Recorder, error) {
@@ -266,7 +279,13 @@ func kubectlLikeCommand(r *http.Request) string {
 
 type recordingResponseWriter struct {
 	http.ResponseWriter
-	recorder *Recorder
+	recorder   *Recorder
+	statusCode int
+}
+
+func (rw *recordingResponseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
 }
 
 func (rw *recordingResponseWriter) Write(p []byte) (int, error) {

@@ -1,0 +1,22 @@
+# ServiceMonitor for the Tether Proxy
+# Scrapes the Prometheus metrics endpoint exposed on :9090/metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tether-proxy
+  namespace: tether-system
+  labels:
+    app.kubernetes.io/name: tether-proxy
+    app.kubernetes.io/component: proxy
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tether-proxy
+  namespaceSelector:
+    matchNames:
+      - tether-system
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scheme: http

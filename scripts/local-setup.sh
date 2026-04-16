@@ -17,6 +17,10 @@ PROXY_PORT="${TETHER_PROXY_PORT:-8443}"
 AUDIT_DIR="${TETHER_AUDIT_DIR:-/tmp/tether-audit}"
 TETHER_TOKEN="${TETHER_TOKEN:-tether-dev-token}"
 TETHER_SESSION="${TETHER_SESSION:-dev-session}"
+TETHER_NAMESPACE="${TETHER_NAMESPACE:-tether-system}"
+OPERATOR_IMAGE="${TETHER_OPERATOR_IMAGE:-tether/operator:dev}"
+PROXY_IMAGE="${TETHER_PROXY_IMAGE:-tether/proxy:dev}"
+DEMO_LEASE_NAME=""
 PID_DIR="/tmp/tether-pids"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KIND_CONFIG="${REPO_ROOT}/scripts/kind-config.yaml"
@@ -60,26 +64,31 @@ ${BOLD}ENVIRONMENT${NC}
   TETHER_AUDIT_DIR    Local audit directory    (default: /tmp/tether-audit)
   TETHER_TOKEN        Static proxy token       (default: tether-dev-token)
   TETHER_SESSION      Dev session ID           (default: dev-session)
+  TETHER_NAMESPACE    Runtime namespace        (default: tether-system)
 
 ${BOLD}WHAT THIS SCRIPT DOES${NC}
   1. Checks prerequisites (kind, kubectl, docker, go)
   2. Creates a Kind cluster (or reuses an existing one)
   3. Installs the TetherLease CRD into the cluster
   4. Builds the operator, proxy, and tetherctl binaries
-  5. Starts the Tether operator in the background
-  6. Starts the Tether proxy in the background
-  7. Creates a demo TetherLease for the current user
-  8. Prints instructions for testing
+  5. Builds container images and loads them into Kind
+  6. Deploys the Tether operator and proxy into the cluster
+  7. Starts a local port-forward to the in-cluster proxy service
+  8. Creates a demo TetherLease for the current user
+  9. Prints instructions for testing
 
 ${BOLD}TESTING AFTER SETUP${NC}
-  # Request access (creates a TetherLease)
-  ./bin/tetherctl request --role view --for 30m --reason "local testing"
+  # Check the demo lease created by the script
+  kubectl get tetherlease demo-kind-tether-dev-setup
+
+  # Wait until the demo lease is active
+  kubectl wait --for=jsonpath='{.status.phase}'=Active tetherlease/demo-kind-tether-dev-setup --timeout=30s
 
   # Activate session (updates kubeconfig to route through proxy)
-  ./bin/tetherctl login --lease LEASE_NAME --proxy https://localhost:${PROXY_PORT} --token ${TETHER_TOKEN} --insecure-skip-tls-verify
+  ./bin/tetherctl login --lease demo-kind-tether-dev-setup --proxy https://localhost:${PROXY_PORT} --token ${TETHER_TOKEN} --insecure-skip-tls-verify
 
-  # Trigger a recordable command (exec/log are recorded)
-  kubectl logs -n kube-system deployment/coredns
+  # Trigger a recordable command through the in-cluster proxy
+  kubectl get namespaces
 
   # Play back the recorded dev session
   ./bin/tetherctl playback --lease ${TETHER_SESSION} --audit-dir ${AUDIT_DIR}
@@ -126,6 +135,11 @@ check_prerequisites() {
     exit 1
   fi
 
+  if [[ "${AUDIT_DIR}" != "/tmp/tether-audit" ]]; then
+    log_error "TETHER_AUDIT_DIR must currently be /tmp/tether-audit for the in-cluster local setup flow."
+    exit 1
+  fi
+
   log_success "All prerequisites satisfied"
 }
 
@@ -135,9 +149,17 @@ check_prerequisites() {
 create_cluster() {
   log_step "Setting up Kind cluster: ${CLUSTER_NAME}"
 
+  local node_name="${CLUSTER_NAME}-control-plane"
+
   if kind get clusters 2>/dev/null | grep -q "^${CLUSTER_NAME}$"; then
-    log_warn "Cluster '${CLUSTER_NAME}' already exists — reusing it."
-    log_info "Run '$0 --teardown' first to start with a fresh cluster."
+    if docker inspect "${node_name}" --format '{{range .Mounts}}{{printf "%s:%s\n" .Source .Destination}}{{end}}' 2>/dev/null | grep -Fqx "${AUDIT_DIR}:${AUDIT_DIR}"; then
+      log_warn "Cluster '${CLUSTER_NAME}' already exists — reusing it."
+    else
+      log_warn "Cluster '${CLUSTER_NAME}' exists without the required audit mount — recreating it."
+      kind delete cluster --name "${CLUSTER_NAME}"
+      kind create cluster --name "${CLUSTER_NAME}" --config "${KIND_CONFIG}" --wait 120s
+      log_success "Kind cluster '${CLUSTER_NAME}' recreated"
+    fi
   else
     log_info "Creating Kind cluster '${CLUSTER_NAME}'…"
     kind create cluster --name "${CLUSTER_NAME}" --config "${KIND_CONFIG}" --wait 120s
@@ -155,19 +177,6 @@ create_cluster() {
   if [[ "${server}" == "https://0.0.0.0:"* ]]; then
     kubectl config set-cluster "kind-${CLUSTER_NAME}" --server "${server/0.0.0.0/127.0.0.1}" >/dev/null
     log_warn "Rewrote kubeconfig server from 0.0.0.0 to 127.0.0.1 for TLS compatibility"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Create tether-system namespace
-# ---------------------------------------------------------------------------
-create_namespace() {
-  log_step "Ensuring tether-system namespace exists"
-  if ! kubectl get namespace tether-system &>/dev/null; then
-    kubectl create namespace tether-system
-    log_success "Namespace 'tether-system' created"
-  else
-    log_info "Namespace 'tether-system' already exists"
   fi
 }
 
@@ -199,82 +208,28 @@ build_binaries() {
 }
 
 # ---------------------------------------------------------------------------
-# Start operator
+# Build container images
 # ---------------------------------------------------------------------------
-start_operator() {
-  log_step "Starting Tether operator"
+build_images() {
+  log_step "Building container images"
 
-  mkdir -p "${PID_DIR}"
-  local pid_file="${PID_DIR}/operator.pid"
-  local log_file="${PID_DIR}/operator.log"
+  cd "${REPO_ROOT}"
+  docker build -t "${OPERATOR_IMAGE}" -f Dockerfile.operator .
+  docker build -t "${PROXY_IMAGE}" -f Dockerfile.proxy .
 
-  # Kill any previously started operator
-  if [[ -f "${pid_file}" ]]; then
-    local old_pid
-    old_pid=$(cat "${pid_file}")
-    if kill -0 "${old_pid}" 2>/dev/null; then
-      log_warn "Stopping previous operator process (PID ${old_pid})"
-      kill "${old_pid}" || true
-      sleep 1
-    fi
-  fi
-
-  KUBECONFIG="${HOME}/.kube/config" \
-    nohup "${REPO_ROOT}/bin/operator" \
-      --metrics-bind-address ":8082" \
-      --health-probe-bind-address ":8083" \
-      --token-namespace "tether-system" \
-      > "${log_file}" 2>&1 &
-
-  echo $! > "${pid_file}"
-  log_info "Operator started (PID $(cat "${pid_file}")), logs: ${log_file}"
-
-  # Brief pause to catch immediate startup errors
-  sleep 2
-  if ! kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
-    log_error "Operator failed to start. Check logs: ${log_file}"
-    tail -20 "${log_file}" >&2
-    exit 1
-  fi
-
-  log_success "Tether operator running"
+  kind load docker-image --name "${CLUSTER_NAME}" "${OPERATOR_IMAGE}" "${PROXY_IMAGE}"
+  log_success "Container images built and loaded into Kind"
 }
 
 # ---------------------------------------------------------------------------
-# Start proxy
+# Ensure proxy TLS assets
 # ---------------------------------------------------------------------------
-start_proxy() {
-  log_step "Starting Tether proxy"
-
+ensure_proxy_tls_assets() {
   mkdir -p "${AUDIT_DIR}" "${PID_DIR}"
-  local pid_file="${PID_DIR}/proxy.pid"
-  local log_file="${PID_DIR}/proxy.log"
+  chmod 0777 "${AUDIT_DIR}"
+
   local tls_cert_file="${PID_DIR}/proxy.crt"
   local tls_key_file="${PID_DIR}/proxy.key"
-
-  # Kill any previously started proxy
-  if [[ -f "${pid_file}" ]]; then
-    local old_pid
-    old_pid=$(cat "${pid_file}")
-    if kill -0 "${old_pid}" 2>/dev/null; then
-      log_warn "Stopping previous proxy process (PID ${old_pid})"
-      kill "${old_pid}" || true
-      sleep 1
-    fi
-  fi
-
-  # Resolve Kind API server URL from kubeconfig
-  local api_server
-  api_server=$(kubectl config view \
-    --minify \
-    -o jsonpath='{.clusters[0].cluster.server}')
-
-  if [[ -z "${api_server}" ]]; then
-    log_error "Could not determine Kubernetes API server URL from kubeconfig."
-    exit 1
-  fi
-
-  log_info "Proxying to API server: ${api_server}"
 
   if [[ ! -f "${tls_cert_file}" || ! -f "${tls_key_file}" ]]; then
     log_info "Generating local TLS certificate for proxy"
@@ -286,25 +241,256 @@ start_proxy() {
       -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
       >/dev/null 2>&1
   fi
+}
 
-  nohup "${REPO_ROOT}/bin/proxy" \
-      --listen ":${PROXY_PORT}" \
-      --target "${api_server}" \
-      --tls-skip-verify \
-      --tls-cert "${tls_cert_file}" \
-      --tls-key "${tls_key_file}" \
-      --audit-dir "${AUDIT_DIR}" \
-      --token-namespace "tether-system" \
-      > "${log_file}" 2>&1 &
+# ---------------------------------------------------------------------------
+# Reset session recording
+# ---------------------------------------------------------------------------
+reset_session_recording() {
+  mkdir -p "${AUDIT_DIR}"
+  chmod 0777 "${AUDIT_DIR}"
+
+  local session_file="${AUDIT_DIR}/${TETHER_SESSION}.cast"
+  if [[ -f "${session_file}" ]]; then
+    log_info "Removing previous recording for session '${TETHER_SESSION}'"
+    rm -f "${session_file}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Deploy in-cluster components
+# ---------------------------------------------------------------------------
+deploy_in_cluster() {
+  log_step "Deploying Tether operator and proxy into the cluster"
+
+  ensure_proxy_tls_assets
+  reset_session_recording
+
+  kubectl create namespace "${TETHER_NAMESPACE}" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl -n "${TETHER_NAMESPACE}" create secret tls tether-proxy-tls \
+    --cert "${PID_DIR}/proxy.crt" \
+    --key "${PID_DIR}/proxy.key" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tether-operator
+  namespace: ${TETHER_NAMESPACE}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tether-proxy
+  namespace: ${TETHER_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tether-operator
+rules:
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tether-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: tether-operator
+subjects:
+  - kind: ServiceAccount
+    name: tether-operator
+    namespace: ${TETHER_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tether-operator-cluster-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: tether-operator
+    namespace: ${TETHER_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tether-proxy-cluster-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: tether-proxy
+    namespace: ${TETHER_NAMESPACE}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tether-operator
+  namespace: ${TETHER_NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tether-operator
+  template:
+    metadata:
+      labels:
+        app: tether-operator
+    spec:
+      serviceAccountName: tether-operator
+      containers:
+        - name: operator
+          image: ${OPERATOR_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8081
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tether-proxy
+  namespace: ${TETHER_NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tether-proxy
+  template:
+    metadata:
+      labels:
+        app: tether-proxy
+    spec:
+      serviceAccountName: tether-proxy
+      containers:
+        - name: proxy
+          image: ${PROXY_IMAGE}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen=:8443
+            - --tls-cert=/tls/tls.crt
+            - --tls-key=/tls/tls.key
+            - --audit-dir=${AUDIT_DIR}
+          env:
+            - name: TETHER_TOKEN
+              value: ${TETHER_TOKEN}
+            - name: TETHER_SESSION_ID
+              value: ${TETHER_SESSION}
+            - name: TETHER_PROXY_BOOT_ID
+              value: "$(date +%s)"
+          ports:
+            - containerPort: 8443
+              name: https
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+          livenessProbe:
+            tcpSocket:
+              port: 8443
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: audit
+              mountPath: ${AUDIT_DIR}
+      volumes:
+        - name: tls
+          secret:
+            secretName: tether-proxy-tls
+        - name: audit
+          hostPath:
+            path: ${AUDIT_DIR}
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tether-proxy
+  namespace: ${TETHER_NAMESPACE}
+spec:
+  selector:
+    app: tether-proxy
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+EOF
+
+  kubectl -n "${TETHER_NAMESPACE}" rollout status deployment/tether-operator --timeout=120s
+  kubectl -n "${TETHER_NAMESPACE}" rollout status deployment/tether-proxy --timeout=120s
+  log_success "Tether operator and proxy are running in-cluster"
+}
+
+# ---------------------------------------------------------------------------
+# Port-forward proxy service locally
+# ---------------------------------------------------------------------------
+start_proxy_port_forward() {
+  log_step "Starting local port-forward to the in-cluster proxy"
+
+  mkdir -p "${PID_DIR}"
+  local legacy_proxy_pid_file="${PID_DIR}/proxy.pid"
+  local pid_file="${PID_DIR}/proxy-port-forward.pid"
+  local log_file="${PID_DIR}/proxy-port-forward.log"
+
+  if [[ -f "${legacy_proxy_pid_file}" ]]; then
+    local legacy_pid
+    legacy_pid=$(cat "${legacy_proxy_pid_file}")
+    if kill -0 "${legacy_pid}" 2>/dev/null; then
+      log_warn "Stopping legacy local proxy process (PID ${legacy_pid})"
+      kill "${legacy_pid}" || true
+      sleep 1
+    fi
+    rm -f "${legacy_proxy_pid_file}"
+  fi
+
+  if [[ -f "${pid_file}" ]]; then
+    local old_pid
+    old_pid=$(cat "${pid_file}")
+    if kill -0 "${old_pid}" 2>/dev/null; then
+      log_warn "Stopping previous proxy port-forward (PID ${old_pid})"
+      kill "${old_pid}" || true
+      sleep 1
+    fi
+  fi
+
+  nohup kubectl -n "${TETHER_NAMESPACE}" port-forward svc/tether-proxy "${PROXY_PORT}:8443" > "${log_file}" 2>&1 &
 
   echo $! > "${pid_file}"
-  log_info "Proxy started (PID $(cat "${pid_file}")), logs: ${log_file}"
+  log_info "Proxy port-forward started (PID $(cat "${pid_file}")), logs: ${log_file}"
 
-  # Wait for proxy to be ready
   local retries=15
   while [[ ${retries} -gt 0 ]]; do
-    if curl -sf --max-time 2 "http://localhost:${PROXY_PORT}/healthz" &>/dev/null \
-       || curl -sf --max-time 2 -k "https://localhost:${PROXY_PORT}/healthz" &>/dev/null; then
+    local status_code
+    status_code="$(curl -sk --max-time 2 -o /dev/null -w '%{http_code}' "https://localhost:${PROXY_PORT}/version" || true)"
+    if [[ "${status_code}" == "401" ]]; then
       break
     fi
     sleep 1
@@ -312,12 +498,12 @@ start_proxy() {
   done
 
   if ! kill -0 "$(cat "${pid_file}")" 2>/dev/null; then
-    log_error "Proxy failed to start. Check logs: ${log_file}"
+    log_error "Proxy port-forward failed to start. Check logs: ${log_file}"
     tail -20 "${log_file}" >&2
     exit 1
   fi
 
-  log_success "Tether proxy listening on :${PROXY_PORT}"
+  log_success "Local proxy endpoint ready on https://localhost:${PROXY_PORT}"
 }
 
 # ---------------------------------------------------------------------------
@@ -331,6 +517,7 @@ create_demo_lease() {
   [[ -z "${user}" ]] && user="${USER:-developer}"
 
   local lease_name="demo-${user}-setup"
+  DEMO_LEASE_NAME="${lease_name}"
 
   # Remove previous demo lease if it exists
   kubectl delete tetherlease "${lease_name}" --ignore-not-found=true &>/dev/null
@@ -349,8 +536,10 @@ EOF
 
   log_success "Demo TetherLease '${lease_name}' created (user: ${user}, role: view, duration: 1h)"
   echo ""
-  log_info "Watch the lease status:"
-  log_info "  kubectl get tetherlease ${lease_name} -w"
+  log_info "Check the lease status:"
+  log_info "  kubectl get tetherlease ${lease_name}"
+  log_info "Wait for activation:"
+  log_info "  kubectl wait --for=jsonpath='{.status.phase}'=Active tetherlease/${lease_name} --timeout=30s"
 }
 
 # ---------------------------------------------------------------------------
@@ -362,35 +551,33 @@ print_summary() {
   echo -e "${CYAN}${BOLD}║           Tether Local Environment Ready! 🎉                ║${NC}"
   echo -e "${CYAN}${BOLD}╚══════════════════════════════════════════════════════════════╝${NC}"
   echo ""
-  echo -e "${BOLD}Cluster:${NC}         kind-${CLUSTER_NAME}"
-  echo -e "${BOLD}Proxy:${NC}           https://localhost:${PROXY_PORT}  (self-signed cert / dev mode)"
-  echo -e "${BOLD}Audit dir:${NC}       ${AUDIT_DIR}"
-  echo -e "${BOLD}Token namespace:${NC} tether-system  (operator stores session tokens here)"
-  echo -e "${BOLD}Operator log:${NC}    ${PID_DIR}/operator.log"
-  echo -e "${BOLD}Proxy log:${NC}       ${PID_DIR}/proxy.log"
+  echo -e "${BOLD}Cluster:${NC}       kind-${CLUSTER_NAME}"
+  echo -e "${BOLD}Namespace:${NC}     ${TETHER_NAMESPACE}"
+  echo -e "${BOLD}Proxy:${NC}         https://localhost:${PROXY_PORT}  (port-forward to in-cluster service)"
+  echo -e "${BOLD}Audit dir:${NC}     ${AUDIT_DIR}"
+  echo -e "${BOLD}Dev token:${NC}     ${TETHER_TOKEN}"
+  echo -e "${BOLD}Operator logs:${NC} kubectl -n ${TETHER_NAMESPACE} logs deploy/tether-operator -f"
+  echo -e "${BOLD}Proxy logs:${NC}    kubectl -n ${TETHER_NAMESPACE} logs deploy/tether-proxy -f"
+  echo -e "${BOLD}PF logs:${NC}       ${PID_DIR}/proxy-port-forward.log"
   echo ""
-  echo -e "${BOLD}${BLUE}Quick-start workflow (JIT access):${NC}"
+  echo -e "${BOLD}${BLUE}Quick-start commands:${NC}"
   echo ""
-  echo -e "  # 1. List existing leases"
-  echo -e "     ./bin/tetherctl list"
+  echo -e "  # 1. Check the demo lease created by setup"
+  echo -e "     kubectl get tetherlease ${DEMO_LEASE_NAME}"
   echo ""
-  echo -e "  # 2. Request just-in-time privileged access"
-  echo -e "     ./bin/tetherctl request --role view --for 30m --reason \"testing\""
+  echo -e "  # 2. Wait until the demo lease is active"
+  echo -e "     kubectl wait --for=jsonpath='{.status.phase}'=Active tetherlease/${DEMO_LEASE_NAME} --timeout=30s"
   echo ""
-  echo -e "  # 3. Activate session — token is auto-fetched from k8s (no --token needed)"
-  echo -e "     ./bin/tetherctl login --lease LEASE_NAME --proxy https://localhost:${PROXY_PORT} --insecure-skip-tls-verify"
+  echo -e "  # 3. Activate session (routes kubectl through the proxy)"
+  echo -e "     ./bin/tetherctl login --lease ${DEMO_LEASE_NAME} --proxy https://localhost:${PROXY_PORT} --token ${TETHER_TOKEN} --insecure-skip-tls-verify"
   echo ""
-  echo -e "  # 4. Run kubectl commands (all requests recorded, session expires automatically)"
-  echo -e "     kubectl get pods -A"
-  echo -e "     kubectl logs -n kube-system deployment/coredns"
+  echo -e "  # 4. Use kubectl normally — all Kubernetes API requests are recorded"
+  echo -e "     kubectl get namespaces"
   echo ""
-  echo -e "  # 5. Play back recorded session"
-  echo -e "     ./bin/tetherctl playback --lease LEASE_NAME --audit-dir ${AUDIT_DIR}"
+  echo -e "  # 5. Play back recorded session (dev session ID)"
+  echo -e "     ./bin/tetherctl playback --lease ${TETHER_SESSION} --audit-dir ${AUDIT_DIR}"
   echo ""
-  echo -e "  # 6. Revoke access early"
-  echo -e "     ./bin/tetherctl revoke --lease LEASE_NAME"
-  echo ""
-  echo -e "  # 7. Tear down when done"
+  echo -e "  # 6. Tear down when done"
   echo -e "     $0 --teardown"
   echo ""
 }
@@ -401,36 +588,31 @@ print_summary() {
 teardown() {
   log_step "Tearing down Tether local environment"
 
-  # Stop operator
-  local op_pid_file="${PID_DIR}/operator.pid"
-  if [[ -f "${op_pid_file}" ]]; then
-    local op_pid
-    op_pid=$(cat "${op_pid_file}")
-    if kill -0 "${op_pid}" 2>/dev/null; then
-      log_info "Stopping operator (PID ${op_pid})"
-      kill "${op_pid}" && rm -f "${op_pid_file}"
+  local legacy_proxy_pid_file="${PID_DIR}/proxy.pid"
+  if [[ -f "${legacy_proxy_pid_file}" ]]; then
+    local legacy_proxy_pid
+    legacy_proxy_pid=$(cat "${legacy_proxy_pid_file}")
+    if kill -0 "${legacy_proxy_pid}" 2>/dev/null; then
+      log_info "Stopping legacy local proxy (PID ${legacy_proxy_pid})"
+      kill "${legacy_proxy_pid}" && rm -f "${legacy_proxy_pid_file}"
     else
-      log_warn "Operator process ${op_pid} not running"
-      rm -f "${op_pid_file}"
+      rm -f "${legacy_proxy_pid_file}"
     fi
-  else
-    log_warn "No operator PID file found at ${op_pid_file}"
   fi
 
-  # Stop proxy
-  local proxy_pid_file="${PID_DIR}/proxy.pid"
-  if [[ -f "${proxy_pid_file}" ]]; then
-    local proxy_pid
-    proxy_pid=$(cat "${proxy_pid_file}")
-    if kill -0 "${proxy_pid}" 2>/dev/null; then
-      log_info "Stopping proxy (PID ${proxy_pid})"
-      kill "${proxy_pid}" && rm -f "${proxy_pid_file}"
+  local pf_pid_file="${PID_DIR}/proxy-port-forward.pid"
+  if [[ -f "${pf_pid_file}" ]]; then
+    local pf_pid
+    pf_pid=$(cat "${pf_pid_file}")
+    if kill -0 "${pf_pid}" 2>/dev/null; then
+      log_info "Stopping proxy port-forward (PID ${pf_pid})"
+      kill "${pf_pid}" && rm -f "${pf_pid_file}"
     else
-      log_warn "Proxy process ${proxy_pid} not running"
-      rm -f "${proxy_pid_file}"
+      log_warn "Proxy port-forward process ${pf_pid} not running"
+      rm -f "${pf_pid_file}"
     fi
   else
-    log_warn "No proxy PID file found at ${proxy_pid_file}"
+    log_warn "No proxy port-forward PID file found at ${pf_pid_file}"
   fi
 
   # Delete Kind cluster
@@ -482,10 +664,10 @@ main() {
   check_prerequisites
   create_cluster
   install_crd
-  create_namespace
   build_binaries
-  start_operator
-  start_proxy
+  build_images
+  deploy_in_cluster
+  start_proxy_port_forward
   create_demo_lease
   print_summary
 }

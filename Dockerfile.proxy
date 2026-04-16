@@ -1,22 +1,22 @@
-# syntax=docker/dockerfile:1
+FROM golang:1.24-alpine AS build
 
-# ── Build stage ────────────────────────────────────────────────────────────────
-FROM golang:1.24-alpine AS builder
+WORKDIR /src
 
-WORKDIR /workspace
+RUN apk add --no-cache ca-certificates git
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" \
-    -o /out/proxy ./cmd/proxy/...
 
-# ── Runtime stage ──────────────────────────────────────────────────────────────
-FROM gcr.io/distroless/static-debian12:nonroot
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /out/proxy ./cmd/proxy/...
 
-COPY --from=builder /out/proxy /proxy
+FROM alpine:3.20
 
-USER nonroot:nonroot
+RUN apk add --no-cache ca-certificates
+
+COPY --from=build /out/proxy /proxy
+
+USER 65532:65532
+
 ENTRYPOINT ["/proxy"]

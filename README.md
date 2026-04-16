@@ -22,6 +22,7 @@ Tether provides time-limited, audited, privileged Kubernetes access. Engineers r
 - [Audit Backend Reference](#audit-backend-reference)
 - [Security Considerations](#security-considerations)
 - [Development Commands](#development-commands)
+- [Observability — Prometheus Metrics](#observability--prometheus-metrics)
 - [Changelog](#changelog)
 
 ---
@@ -652,6 +653,45 @@ make docker-push    # Push images to ghcr.io/jaydee94/tether
 make manifests      # Regenerate CRD manifests (requires controller-gen)
 make generate       # Regenerate deepcopy functions (requires controller-gen)
 ```
+
+---
+
+## Observability — Prometheus Metrics
+
+Both the operator and proxy expose Prometheus-compatible metrics endpoints.
+
+### Operator metrics
+
+The operator uses the [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime) metrics server (default `:8080/metrics`).
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `lease_activations_total` | Counter | Total TetherLease activations |
+| `lease_expirations_total` | Counter | Total TetherLease expirations |
+| `lease_revocations_total` | Counter | Total TetherLease revocations |
+| `active_leases` | Gauge | Current number of active TetherLeases |
+| `tether_operator_reconcile_outcomes_total` | Counter | Reconcile outcomes by `outcome` and `reason` labels |
+
+### Proxy metrics
+
+The proxy exposes a separate metrics server (default `:9090/metrics`, configurable via `--metrics-bind-address`).
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `proxy_requests_total` | Counter | Total proxied requests, labeled by HTTP `status` code |
+| `proxy_request_duration_seconds` | Histogram | Latency of proxied requests in seconds |
+| `token_validation_errors_total` | Counter | Token validation failures |
+
+### Scraping with Prometheus Operator
+
+`ServiceMonitor` manifests for both components are provided in `deploy/`:
+
+```bash
+kubectl apply -f deploy/servicemonitor-operator.yaml
+kubectl apply -f deploy/servicemonitor-proxy.yaml
+```
+
+Both expect the respective Kubernetes `Service` to expose a port named `metrics` pointing to the metrics address. Adjust the `namespace` and `selector` labels as needed for your deployment.
 
 ---
 

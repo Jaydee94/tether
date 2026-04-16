@@ -13,10 +13,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"github.com/prometheus/client_golang/prometheus"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	tetherv1alpha1 "github.com/Jaydee94/tether/pkg/api/v1alpha1"
 )
@@ -35,6 +37,38 @@ const (
 	// TokenDataKey is the key inside the Secret's data map that holds the raw token.
 	TokenDataKey = "token"
 )
+
+var (
+	leaseActivationsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "lease_activations_total",
+		Help: "Total number of TetherLease activations.",
+	})
+
+	leaseExpirationsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "lease_expirations_total",
+		Help: "Total number of TetherLease expirations.",
+	})
+
+	leaseRevocationsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "lease_revocations_total",
+		Help: "Total number of TetherLease revocations.",
+	})
+
+	activeLeases = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "active_leases",
+		Help: "Current number of active TetherLeases.",
+	})
+)
+
+func init() {
+	metrics.Registry.MustRegister(
+		leaseActivationsTotal,
+		leaseExpirationsTotal,
+		leaseRevocationsTotal,
+		activeLeases,
+	)
+}
+
 
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases/status,verbs=get;update;patch
@@ -157,6 +191,8 @@ func (r *TetherLeaseReconciler) activateLease(ctx context.Context, lease *tether
 		return ctrl.Result{}, err
 	}
 
+	leaseActivationsTotal.Inc()
+	activeLeases.Inc()
 	logger.Info("Lease activated", "lease", lease.Name, "expiresAt", expiresAt.Time, "tokenSecret", secretName)
 	return ctrl.Result{RequeueAfter: duration}, nil
 }
@@ -221,6 +257,8 @@ func (r *TetherLeaseReconciler) expireLease(ctx context.Context, lease *tetherv1
 	if err := r.Status().Update(ctx, lease); err != nil {
 		return ctrl.Result{}, err
 	}
+	leaseExpirationsTotal.Inc()
+	activeLeases.Dec()
 	return ctrl.Result{}, nil
 }
 
@@ -240,6 +278,8 @@ func (r *TetherLeaseReconciler) handleRevoked(ctx context.Context, lease *tether
 	if err := r.Status().Update(ctx, lease); err != nil {
 		return ctrl.Result{}, err
 	}
+	leaseRevocationsTotal.Inc()
+	activeLeases.Dec()
 	return ctrl.Result{}, nil
 }
 

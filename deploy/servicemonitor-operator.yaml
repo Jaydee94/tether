@@ -1,0 +1,22 @@
+# ServiceMonitor for the Tether Operator
+# Scrapes the controller-runtime metrics endpoint exposed on :8080/metrics
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: tether-operator
+  namespace: tether-system
+  labels:
+    app.kubernetes.io/name: tether-operator
+    app.kubernetes.io/component: operator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tether-operator
+  namespaceSelector:
+    matchNames:
+      - tether-system
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+      scheme: http
