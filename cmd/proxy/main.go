@@ -24,6 +24,7 @@ func main() {
 		targetAddr         string
 		upstreamKubeconfig string
 		auditDir           string
+		auditMaxFileSize   int64
 		tlsSkipVerify      bool
 		tlsCertFile        string
 		tlsKeyFile         string
@@ -35,6 +36,7 @@ func main() {
 	flag.StringVar(&targetAddr, "target", "https://kubernetes.default.svc", "Kubernetes API server URL.")
 	flag.StringVar(&upstreamKubeconfig, "upstream-kubeconfig", defaultKubeconfig(), "Path to kubeconfig used for upstream API auth.")
 	flag.StringVar(&auditDir, "audit-dir", "/var/tether/audit", "Directory for local audit recordings.")
+	flag.Int64Var(&auditMaxFileSize, "audit-max-file-size", 0, "Maximum size in bytes for a single audit .cast file before rotation (0 = disabled).")
 	flag.BoolVar(&tlsSkipVerify, "tls-skip-verify", false, "Skip TLS verification of the upstream API server (dev only).")
 	flag.StringVar(&tlsCertFile, "tls-cert", "", "Path to TLS certificate file for the proxy listener.")
 	flag.StringVar(&tlsKeyFile, "tls-key", "", "Path to TLS key file for the proxy listener.")
@@ -43,7 +45,9 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	log := ctrl.Log.WithName("proxy")
 
-	backend, err := audit.NewLocalBackend(auditDir)
+	backend, err := audit.NewLocalBackendWithConfig(auditDir, audit.LocalBackendConfig{
+		MaxFileSizeBytes: auditMaxFileSize,
+	})
 	if err != nil {
 		log.Error(err, "Failed to create audit backend")
 		os.Exit(1)
@@ -100,9 +104,20 @@ func main() {
 }
 
 func buildUpstreamTransport(targetAddr, kubeconfig string, tlsSkipVerify bool) (http.RoundTripper, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
-	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig %q: %w", kubeconfig, err)
+	var (
+		cfg          *rest.Config
+		loadErr      error
+		inClusterErr error
+	)
+
+	if kubeconfig != "" {
+		cfg, loadErr = clientcmd.BuildConfigFromFlags("", kubeconfig)
+	}
+	if loadErr != nil || cfg == nil {
+		cfg, inClusterErr = rest.InClusterConfig()
+		if inClusterErr != nil {
+			return nil, fmt.Errorf("loading upstream kubernetes config: kubeconfig=%q err=%v, incluster=%w", kubeconfig, loadErr, inClusterErr)
+		}
 	}
 
 	if targetAddr != "" {
