@@ -1,4 +1,19 @@
-# Tether — Kubernetes Privileged Access Management
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="Tether — Kubernetes Privileged Access Management" width="520"/>
+</p>
+
+<p align="center">
+  <strong>Time-limited, audited, privileged Kubernetes access — zero standing permissions.</strong>
+</p>
+
+<p align="center">
+  <a href="#architecture">Architecture</a> ·
+  <a href="#security-considerations">Security</a> ·
+  <a href="#getting-started">Getting Started</a> ·
+  <a href="#development-commands">Development</a>
+</p>
+
+---
 
 Tether provides time-limited, audited, privileged Kubernetes access. Engineers request a `TetherLease` CRD, the operator creates a `ClusterRoleBinding` that auto-expires, and all `kubectl exec` / `kubectl logs` traffic is recorded in Asciinema format for audit purposes.
 
@@ -69,44 +84,42 @@ The operator activates the lease by creating a `ClusterRoleBinding` and schedule
     └── crd/           # CRD YAML manifest
 ```
 
-## Getting Started
+## Quick Start — Run Locally (Kind)
 
-### Local Development with Kind (recommended)
-
-The quickest way to spin up a fully working Tether environment locally is the
-included setup script.  It requires [kind](https://kind.sigs.k8s.io/),
-[kubectl](https://kubernetes.io/docs/tasks/tools/), [docker](https://docs.docker.com/get-docker/),
-and [go](https://go.dev/doc/install).
+These steps bootstrap a local environment for development and testing. Requirements: `kind`, `docker`, `kubectl`, and Go toolchain installed.
 
 ```bash
-# Bootstrap a Kind cluster, install the CRD, build binaries,
-# and start the operator + proxy in the background.
-make local-setup
-# or: ./scripts/local-setup.sh
+# 1) Build binaries and apply CRD
+make build
+make install
 
-# Tear everything down when you're done.
+# 2) Bootstrap a Kind cluster and start components
+make local-setup
+
+# 3) Request a lease and login (example)
+./bin/tetherctl request --role cluster-admin --for 30m --reason "testing"
+./bin/tetherctl login --lease <lease-name>
+
+# 4) When finished, teardown
 make local-teardown
-# or: ./scripts/local-setup.sh --teardown
 ```
 
-The script will:
-1. Create a Kind cluster called `tether-dev` (if one already exists with that name, it is reused — run `make local-teardown` first for a clean start)
-2. Install the `TetherLease` CRD
-3. Build the `operator`, `proxy`, and `tetherctl` binaries into `./bin/`
-4. Start the operator in the background (logs → `/tmp/tether-pids/operator.log`)
-5. Start the proxy on `:8443` in the background (logs → `/tmp/tether-pids/proxy.log`)
-6. Create a demo `TetherLease` so you can see the full lifecycle immediately
+The `make local-setup` script runs the same sequence (build, install CRD, start operator + proxy) and is a convenient shortcut.
 
-After setup, follow the printed instructions to request leases and route
-`kubectl` through the proxy for a recorded session.
+Environment variables you can override:
 
-> **Environment variables** you can override:
-> | Variable | Default | Description |
-> |---|---|---|
-> | `TETHER_CLUSTER` | `tether-dev` | Kind cluster name |
-> | `TETHER_PROXY_PORT` | `8443` | Proxy listen port |
-> | `TETHER_AUDIT_DIR` | `/tmp/tether-audit` | Local audit directory |
-> | `TETHER_TOKEN` | `tether-dev-token` | Static dev token for the proxy |
+| Variable | Default | Description |
+|---|---|---|
+| `TETHER_CLUSTER` | `tether-dev` | Kind cluster name |
+| `TETHER_PROXY_PORT` | `8443` | Proxy listen port |
+| `TETHER_AUDIT_DIR` | `/tmp/tether-audit` | Local audit directory |
+| `TETHER_TOKEN` | `tether-dev-token` | Static dev token for the proxy (dev only) |
+
+### Troubleshooting
+
+- If `make local-setup` fails, inspect logs in `/tmp/tether-pids/` and ensure `kind` and `docker` are running.
+- If the proxy fails to start due to port conflict, adjust `TETHER_PROXY_PORT` and restart.
+- For TLS development, use the `--tls-skip-verify` flag only in trusted environments.
 
 ---
 
