@@ -125,6 +125,24 @@ func (c *CachedLeaseValidator) NotifyExpired(leaseName string) {
 	c.evictByLease(leaseName)
 }
 
+// IsActive returns true if at least one cached token entry currently maps to
+// leaseName and has not yet expired. This implements SessionFinalizer and lets
+// TetherProxy know whether it should keep the recorder open.
+//
+// Note: a false return means the session is no longer cached as active. The
+// proxy will then call FinishSession to flush and discard the recorder.
+func (c *CachedLeaseValidator) IsActive(_ context.Context, leaseName string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := time.Now()
+	for _, entry := range c.cache {
+		if entry.sessionID == leaseName && now.Before(entry.expiresAt) {
+			return true
+		}
+	}
+	return false
+}
+
 // evictByLease removes all cache entries whose sessionID matches leaseName.
 func (c *CachedLeaseValidator) evictByLease(leaseName string) {
 	c.mu.Lock()

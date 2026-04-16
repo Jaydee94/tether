@@ -16,6 +16,16 @@ import (
 	"github.com/Jaydee94/tether/pkg/audit"
 )
 
+// SessionFinalizer is implemented by validators that can report when a session
+// is no longer active (expired or revoked). The proxy uses this to decide when
+// to flush and discard a session recorder.
+type SessionFinalizer interface {
+	// IsActive returns true if the session identified by sessionID is still
+	// considered valid. Returning false causes the proxy to call Finish() on
+	// the recorder and remove it from the active map.
+	IsActive(ctx context.Context, sessionID string) bool
+}
+
 // SessionValidator validates X-Tether-Token values.
 type SessionValidator interface {
 	Validate(ctx context.Context, token string) (sessionID string, err error)
@@ -30,6 +40,75 @@ type TetherProxy struct {
 
 	mu        sync.Mutex
 	recorders map[string]*Recorder
+}
+
+// FinishSession flushes the recorder for sessionID to the backend and removes
+// it from the active session map. It is a no-op if no recorder exists for the
+// session. Safe to call concurrently.
+func (p *TetherProxy) FinishSession(ctx context.Context, sessionID string) {
+	p.mu.Lock()
+	rec, ok := p.recorders[sessionID]
+	if ok {
+		delete(p.recorders, sessionID)
+	}
+	p.mu.Unlock()
+
+	if !ok {
+		return
+	}
+
+	logger := log.FromContext(ctx)
+	if err := rec.Finish(ctx); err != nil {
+		logger.Error(err, "Failed to flush session recording", "sessionID", sessionID)
+	} else {
+		logger.Info("Session recording flushed", "sessionID", sessionID)
+	}
+}
+
+// StartSessionReaper launches a background goroutine that periodically checks
+// all active session recorders against the provided SessionFinalizer. Any
+// session that is no longer active (expired or revoked) is flushed and
+// discarded. The goroutine exits when ctx is cancelled.
+//
+// Call this once after constructing TetherProxy when you have a finalizer
+// available (e.g. the CachedLeaseValidator). If finalizer is nil the reaper is
+// not started.
+func (p *TetherProxy) StartSessionReaper(ctx context.Context, finalizer SessionFinalizer, interval time.Duration) {
+	if finalizer == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.reapSessions(ctx, finalizer)
+			}
+		}
+	}()
+}
+
+// reapSessions checks each active session and finalises any that are no longer
+// active according to finalizer.
+func (p *TetherProxy) reapSessions(ctx context.Context, finalizer SessionFinalizer) {
+	p.mu.Lock()
+	ids := make([]string, 0, len(p.recorders))
+	for id := range p.recorders {
+		ids = append(ids, id)
+	}
+	p.mu.Unlock()
+
+	for _, id := range ids {
+		if !finalizer.IsActive(ctx, id) {
+			p.FinishSession(ctx, id)
+		}
+	}
 }
 
 // NewTetherProxy creates a proxy that forwards to target.
@@ -109,16 +188,6 @@ func (p *TetherProxy) serveWithRecording(w http.ResponseWriter, r *http.Request,
 	}
 
 	p.proxy.ServeHTTP(rw, r)
-
-	go func() {
-		saveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := recorder.Finish(saveCtx); err != nil {
-			logger.Error(err, "Failed to save session recording", "sessionID", sessionID)
-		} else {
-			logger.Info("Session recording saved", "sessionID", sessionID)
-		}
-	}()
 }
 
 func (p *TetherProxy) recorderForSession(sessionID string) (*Recorder, error) {
