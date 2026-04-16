@@ -116,3 +116,35 @@ func TestKubernetesLeaseValidator_EmptyToken(t *testing.T) {
 		t.Error("expected error for empty token")
 	}
 }
+
+func TestKubernetesLeaseValidator_MissingLeaseLabel(t *testing.T) {
+	const (
+		token = "some-token"
+		ns    = "tether-system"
+	)
+
+	// Secret matches by token value but is missing the tether.dev/lease label.
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tether-token-nolabel",
+			Namespace: ns,
+			Labels: map[string]string{
+				labelTokenType: tokenSecretType,
+				// labelTokenLease intentionally omitted
+			},
+		},
+		Data: map[string][]byte{
+			tokenDataKey: []byte(token),
+		},
+	}
+
+	kubeClient := kubefake.NewSimpleClientset(secret)
+	scheme := runtime.NewScheme()
+	dynClient := dynfake.NewSimpleDynamicClient(scheme)
+
+	v := NewKubernetesLeaseValidator(kubeClient, dynClient, ns)
+	_, err := v.Validate(context.Background(), token)
+	if err == nil {
+		t.Error("expected error when tether.dev/lease label is missing")
+	}
+}
