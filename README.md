@@ -1,4 +1,19 @@
-# Tether — Kubernetes Privileged Access Management
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="Tether — Kubernetes Privileged Access Management" width="520"/>
+</p>
+
+<p align="center">
+  <strong>Time-limited, audited, privileged Kubernetes access — zero standing permissions.</strong>
+</p>
+
+<p align="center">
+  <a href="#architecture">Architecture</a> ·
+  <a href="#table-of-contents">Docs</a> ·
+  <a href="#security-considerations">Security</a> ·
+  <a href="#getting-started">Getting Started</a>
+</p>
+
+---
 
 Tether provides time-limited, audited, privileged Kubernetes access. Engineers request a `TetherLease` CRD, the operator creates a `ClusterRoleBinding` that auto-expires, and all `kubectl exec` / `kubectl logs` traffic is recorded in Asciinema format for audit purposes.
 
