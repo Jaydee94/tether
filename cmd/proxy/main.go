@@ -33,6 +33,7 @@ func main() {
 		tokenNamespace     string
 		devToken           string
 		devSessionID       string
+		devMode            bool
 	)
 
 	opts := zap.Options{Development: true}
@@ -49,6 +50,7 @@ func main() {
 	// Dev-mode flags: if both are set, fall back to a static single-token validator (useful in CI/testing).
 	flag.StringVar(&devToken, "dev-token", os.Getenv("TETHER_TOKEN"), "Dev-only static token (overrides k8s-backed validation).")
 	flag.StringVar(&devSessionID, "dev-session-id", os.Getenv("TETHER_SESSION_ID"), "Session ID paired with --dev-token.")
+	flag.BoolVar(&devMode, "dev-mode", false, "Disable TLS on the proxy listener (development only; never use in production).")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -115,12 +117,18 @@ func main() {
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	log.Info("Tether proxy starting", "listen", listenAddr, "target", targetAddr)
+	// Enforce TLS in production mode.
+	if !devMode && (tlsCertFile == "" || tlsKeyFile == "") {
+		fmt.Fprintln(os.Stderr, "TLS cert and key are required in production mode. Use --dev-mode to disable TLS (development only).")
+		os.Exit(1)
+	}
+
+	log.Info("Tether proxy starting", "listen", listenAddr, "target", targetAddr, "devMode", devMode)
 	var srvErr error
 	if tlsCertFile != "" && tlsKeyFile != "" {
 		srvErr = srv.ListenAndServeTLS(tlsCertFile, tlsKeyFile)
 	} else {
-		log.Info("TLS cert/key not provided, starting HTTP (dev mode)")
+		log.Info("TLS cert/key not provided, starting HTTP (--dev-mode enabled)")
 		srvErr = srv.ListenAndServe()
 	}
 	if srvErr != nil && srvErr != http.ErrServerClosed {

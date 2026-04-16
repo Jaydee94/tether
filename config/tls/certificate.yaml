@@ -1,0 +1,57 @@
+---
+# Example cert-manager Issuer using Let's Encrypt ACME (HTTP-01 challenge).
+# Replace <your-email> and <your-domain> with real values.
+# Requires cert-manager >= v1.0 installed in the cluster.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: tether-letsencrypt
+  namespace: tether-system
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: <your-email>
+    privateKeySecretRef:
+      name: tether-letsencrypt-account-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+# Certificate resource that cert-manager will fulfil.
+# The resulting TLS secret (tether-proxy-tls) can be mounted into the proxy pod
+# via --tls-cert and --tls-key flags pointing to the mounted files.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tether-proxy-tls
+  namespace: tether-system
+spec:
+  secretName: tether-proxy-tls
+  duration: 2160h   # 90 days
+  renewBefore: 360h # 15 days before expiry
+  commonName: <your-domain>
+  dnsNames:
+    - <your-domain>
+  issuerRef:
+    name: tether-letsencrypt
+    kind: Issuer
+    group: cert-manager.io
+---
+# Alternatively, use a ClusterIssuer for cluster-wide certificate management.
+# Uncomment and replace the Issuer above if you prefer a ClusterIssuer.
+#
+# apiVersion: cert-manager.io/v1
+# kind: ClusterIssuer
+# metadata:
+#   name: tether-letsencrypt-cluster
+# spec:
+#   acme:
+#     server: https://acme-v02.api.letsencrypt.org/directory
+#     email: <your-email>
+#     privateKeySecretRef:
+#       name: tether-letsencrypt-cluster-key
+#     solvers:
+#       - http01:
+#           ingress:
+#             class: nginx
