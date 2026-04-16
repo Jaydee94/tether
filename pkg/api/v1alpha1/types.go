@@ -22,27 +22,57 @@ type TetherLease struct {
 
 // TetherLeaseSpec defines the desired state of TetherLease.
 type TetherLeaseSpec struct {
-	User     string `json:"user"`
-	Role     string `json:"role"`
-	Duration string `json:"duration"`
-	Reason   string `json:"reason,omitempty"`
+	User      string   `json:"user"`
+	Role      string   `json:"role"`
+	Duration  string   `json:"duration"`
+	Reason    string   `json:"reason,omitempty"`
+	Approvers []string `json:"approvers,omitempty"`
 }
 
 // TetherLeaseStatus defines the observed state of TetherLease.
 type TetherLeaseStatus struct {
-	Phase       TetherLeasePhase `json:"phase,omitempty"`
-	ExpiresAt   *metav1.Time     `json:"expiresAt,omitempty"`
-	BindingName string           `json:"bindingName,omitempty"`
+	Phase              TetherLeasePhase `json:"phase,omitempty"`
+	ExpiresAt          *metav1.Time     `json:"expiresAt,omitempty"`
+	BindingName        string           `json:"bindingName,omitempty"`
+	ObservedGeneration int64            `json:"observedGeneration,omitempty"`
+	ApprovedBy         string           `json:"approvedBy,omitempty"`
+	DeniedBy           string           `json:"deniedBy,omitempty"`
+	// +patchMergeKey=type
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
 // TetherLeasePhase describes the lifecycle phase of a TetherLease.
 type TetherLeasePhase string
 
 const (
-	PhasePending TetherLeasePhase = "Pending"
-	PhaseActive  TetherLeasePhase = "Active"
-	PhaseExpired TetherLeasePhase = "Expired"
-	PhaseRevoked TetherLeasePhase = "Revoked"
+	PhasePending         TetherLeasePhase = "Pending"
+	PhasePendingApproval TetherLeasePhase = "PendingApproval"
+	PhaseActive          TetherLeasePhase = "Active"
+	PhaseExpired         TetherLeasePhase = "Expired"
+	PhaseRevoked         TetherLeasePhase = "Revoked"
+	PhaseDenied          TetherLeasePhase = "Denied"
+)
+
+const (
+	ConditionReady = "Ready"
+)
+
+const (
+	ReasonActivated        = "Activated"
+	ReasonInvalidRole      = "InvalidRole"
+	ReasonInvalidUser      = "InvalidUser"
+	ReasonInvalidDuration  = "InvalidDuration"
+	ReasonDurationTooShort = "DurationTooShort"
+	ReasonDurationTooLong  = "DurationTooLong"
+	ReasonActivationFailed = "ActivationFailed"
+	ReasonExpired          = "Expired"
+	ReasonRevoked          = "Revoked"
+	ReasonPendingApproval  = "PendingApproval"
+	ReasonApproved         = "Approved"
+	ReasonDenied           = "Denied"
 )
 
 // +kubebuilder:object:root=true

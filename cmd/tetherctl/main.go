@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -33,7 +34,7 @@ It allows you to request time-limited access, configure kubeconfig, and play bac
 
 func main() {
 	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", defaultKubeconfig(), "Path to kubeconfig file.")
-	rootCmd.AddCommand(newRequestCmd(), newLoginCmd(), newPlaybackCmd())
+	rootCmd.AddCommand(newRequestCmd(), newLoginCmd(), newPlaybackCmd(), newApproveCmd(), newDenyCmd())
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -289,12 +290,90 @@ func playbackCast(data []byte) error {
 			if delay > 0 && delay < 5 {
 				time.Sleep(time.Duration(delay * float64(time.Second)))
 			}
-			fmt.Print(eventData)
+			fmt.Print(formatPlaybackOutput(eventData))
 			lastTime = t
 		}
 	}
 	fmt.Println()
 	return nil
+}
+
+func formatPlaybackOutput(eventData string) string {
+	trimmed := strings.TrimSpace(eventData)
+	if strings.HasPrefix(trimmed, "{") && strings.Contains(trimmed, "\"kind\"") {
+		tableText, ok := renderKubeTableJSON(trimmed)
+		if ok {
+			if !strings.HasSuffix(tableText, "\n") {
+				tableText += "\n"
+			}
+			return tableText
+		}
+	}
+	return eventData
+}
+
+func renderKubeTableJSON(raw string) (string, bool) {
+	type colDef struct {
+		Name string `json:"name"`
+	}
+	type row struct {
+		Cells []interface{} `json:"cells"`
+	}
+	type kubeTable struct {
+		Kind              string   `json:"kind"`
+		ColumnDefinitions []colDef `json:"columnDefinitions"`
+		Rows              []row    `json:"rows"`
+	}
+
+	var table kubeTable
+	if err := json.Unmarshal([]byte(raw), &table); err != nil {
+		return "", false
+	}
+	if table.Kind != "Table" || len(table.ColumnDefinitions) == 0 {
+		return "", false
+	}
+
+	headers := make([]string, 0, len(table.ColumnDefinitions))
+	widths := make([]int, 0, len(table.ColumnDefinitions))
+	for _, c := range table.ColumnDefinitions {
+		headers = append(headers, c.Name)
+		widths = append(widths, len(c.Name))
+	}
+
+	rows := make([][]string, 0, len(table.Rows))
+	for _, r := range table.Rows {
+		rowVals := make([]string, len(headers))
+		for i := range headers {
+			if i < len(r.Cells) {
+				rowVals[i] = fmt.Sprint(r.Cells[i])
+			}
+			if len(rowVals[i]) > widths[i] {
+				widths[i] = len(rowVals[i])
+			}
+		}
+		rows = append(rows, rowVals)
+	}
+
+	var b strings.Builder
+	writeRow := func(vals []string) {
+		for i, v := range vals {
+			if i > 0 {
+				b.WriteString("  ")
+			}
+			b.WriteString(v)
+			if pad := widths[i] - len(v); pad > 0 {
+				b.WriteString(strings.Repeat(" ", pad))
+			}
+		}
+		b.WriteByte('\n')
+	}
+
+	writeRow(headers)
+	for _, r := range rows {
+		writeRow(r)
+	}
+
+	return b.String(), true
 }
 
 func splitLines(data []byte) [][]byte {
@@ -407,6 +486,94 @@ func containsString(items []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func newApproveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "approve <lease-name>",
+		Short:   "Approve a TetherLease pending approval",
+		Example: `  tetherctl approve alice-1234567890`,
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			leaseName := args[0]
+			return patchLeaseApproval(leaseName, true)
+		},
+	}
+	return cmd
+}
+
+func newDenyCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "deny <lease-name>",
+		Short:   "Deny a TetherLease pending approval",
+		Example: `  tetherctl deny alice-1234567890`,
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			leaseName := args[0]
+			return patchLeaseApproval(leaseName, false)
+		},
+	}
+	return cmd
+}
+
+func patchLeaseApproval(leaseName string, approve bool) error {
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return fmt.Errorf("loading kubeconfig: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("creating dynamic client: %w", err)
+	}
+
+	actor := currentUser(kubeconfig)
+
+	var statusPatch map[string]interface{}
+	if approve {
+		statusPatch = map[string]interface{}{
+			"status": map[string]interface{}{
+				"phase":      "Pending",
+				"approvedBy": actor,
+			},
+		}
+	} else {
+		statusPatch = map[string]interface{}{
+			"status": map[string]interface{}{
+				"phase":    "Denied",
+				"deniedBy": actor,
+			},
+		}
+	}
+
+	patchBytes, err := json.Marshal(statusPatch)
+	if err != nil {
+		return fmt.Errorf("marshaling patch: %w", err)
+	}
+
+	_, err = dynClient.Resource(tetherLeaseGVR).Patch(
+		context.Background(),
+		leaseName,
+		types.MergePatchType,
+		patchBytes,
+		metav1.PatchOptions{},
+		"status",
+	)
+	if err != nil {
+		action := "approving"
+		if !approve {
+			action = "denying"
+		}
+		return fmt.Errorf("%s TetherLease %q: %w", action, leaseName, err)
+	}
+
+	if approve {
+		fmt.Printf("TetherLease %q approved by %s.\n", leaseName, actor)
+		fmt.Println("The operator will now activate the lease.")
+	} else {
+		fmt.Printf("TetherLease %q denied by %s.\n", leaseName, actor)
+	}
+	return nil
 }
 
 func autoLeaseName(user string, now time.Time) string {
