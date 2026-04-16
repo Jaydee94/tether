@@ -1,0 +1,85 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tether-proxy
+  namespace: tether-system
+  labels:
+    app.kubernetes.io/name: tether-proxy
+    app.kubernetes.io/component: proxy
+    app.kubernetes.io/part-of: tether
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tether-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: tether-proxy
+        app.kubernetes.io/component: proxy
+        app.kubernetes.io/part-of: tether
+    spec:
+      serviceAccountName: tether-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: proxy
+          image: ghcr.io/jaydee94/tether/proxy:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen=:8443
+            - --target=https://kubernetes.default.svc
+            - --audit-dir=/var/tether/audit
+            - --tls-cert=/tls/tls.crt
+            - --tls-key=/tls/tls.key
+            - --token-namespace=tether-system
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: audit
+              mountPath: /var/tether/audit
+      volumes:
+        - name: tls
+          secret:
+            secretName: tether-proxy-tls
+        - name: audit
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tether-proxy
+  namespace: tether-system
+  labels:
+    app.kubernetes.io/name: tether-proxy
+    app.kubernetes.io/component: proxy
+    app.kubernetes.io/part-of: tether
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: tether-proxy
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+      protocol: TCP

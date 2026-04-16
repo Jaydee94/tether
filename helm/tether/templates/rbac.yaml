@@ -1,0 +1,52 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tether-operator
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{ include "tether.operator.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tether-operator
+  labels:
+    {{ include "tether.operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases/finalizers"]
+    verbs: ["update"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tether-operator
+  labels:
+    {{ include "tether.operator.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: tether-operator
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: tether-operator
+  apiGroup: rbac.authorization.k8s.io

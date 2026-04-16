@@ -3,7 +3,7 @@ MODULE     := github.com/Jaydee94/tether
 IMAGE_TAG  ?= latest
 IMAGE_REPO ?= ghcr.io/jaydee94/tether
 
-.PHONY: all build test lint manifests docker-build docker-push clean local-setup local-teardown
+.PHONY: all build test lint manifests docker-build docker-push clean local-setup local-teardown deploy undeploy helm-install helm-uninstall
 
 all: build
 
@@ -66,9 +66,32 @@ install:
 uninstall:
 	kubectl delete -f config/crd/tetherlease.yaml --ignore-not-found
 
-## Deploy operator to the cluster
+## Deploy operator and all resources to the cluster (namespace, CRD, RBAC, operator, proxy)
 deploy:
-	kubectl apply -f config/
+	kubectl apply -f config/namespace/
+	kubectl apply -f config/crd/
+	kubectl apply -f config/rbac/
+	kubectl apply -f config/operator/
+	kubectl apply -f config/proxy/
+
+## Undeploy operator and all resources from the cluster
+undeploy:
+	kubectl delete -f config/proxy/ --ignore-not-found
+	kubectl delete -f config/operator/ --ignore-not-found
+	kubectl delete -f config/rbac/ --ignore-not-found
+	kubectl delete -f config/crd/ --ignore-not-found
+	kubectl delete -f config/namespace/ --ignore-not-found
+
+## Install via Helm (requires helm and cluster access)
+helm-install:
+	helm upgrade --install tether helm/tether \
+	  --namespace tether-system --create-namespace \
+	  --set operator.image.tag=$(IMAGE_TAG) \
+	  --set proxy.image.tag=$(IMAGE_TAG)
+
+## Uninstall Helm release
+helm-uninstall:
+	helm uninstall tether --namespace tether-system
 
 ## Run the operator locally (requires cluster access)
 run-operator:

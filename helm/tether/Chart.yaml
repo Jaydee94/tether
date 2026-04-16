@@ -1,0 +1,16 @@
+apiVersion: v2
+name: tether
+description: Kubernetes Privileged Access Management (PAM) operator and proxy
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - pam
+  - kubernetes
+  - rbac
+  - access-management
+home: https://github.com/Jaydee94/tether
+sources:
+  - https://github.com/Jaydee94/tether
+maintainers:
+  - name: Jaydee94

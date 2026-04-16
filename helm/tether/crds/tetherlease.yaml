@@ -1,0 +1,87 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: tetherleases.tether.dev
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.14.0
+spec:
+  group: tether.dev
+  names:
+    kind: TetherLease
+    listKind: TetherLeaseList
+    plural: tetherleases
+    singular: tetherlease
+    shortNames:
+      - tl
+  scope: Cluster
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: User
+          type: string
+          jsonPath: .spec.user
+        - name: Role
+          type: string
+          jsonPath: .spec.role
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Expires
+          type: string
+          jsonPath: .status.expiresAt
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: TetherLease grants time-limited privileged Kubernetes access.
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - user
+                - role
+                - duration
+              properties:
+                user:
+                  type: string
+                  description: Kubernetes user or service account to grant access to.
+                role:
+                  type: string
+                  description: ClusterRole to bind to the user.
+                duration:
+                  type: string
+                  description: Duration for which access is granted (e.g. "1h", "30m").
+                  pattern: '^[0-9]+(ns|us|µs|ms|s|m|h)$'
+                reason:
+                  type: string
+                  description: Human-readable explanation for the access request.
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Active, Expired, Revoked]
+                  description: Current lifecycle phase of the lease.
+                expiresAt:
+                  type: string
+                  format: date-time
+                  description: Time at which the lease expires.
+                bindingName:
+                  type: string
+                  description: Name of the ClusterRoleBinding created for this lease.
+                tokenSecret:
+                  type: string
+                  description: Name of the k8s Secret (in the tether namespace) that holds the session token.

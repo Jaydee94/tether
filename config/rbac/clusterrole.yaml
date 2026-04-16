@@ -1,0 +1,51 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tether-operator
+  labels:
+    app.kubernetes.io/name: tether-operator
+    app.kubernetes.io/part-of: tether
+rules:
+  # TetherLease CRD
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["tether.dev"]
+    resources: ["tetherleases/finalizers"]
+    verbs: ["update"]
+  # ClusterRoleBindings – operator creates/deletes per-lease bindings
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Secrets – store session tokens in tether-system
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # Leader-election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: tether-operator
+  labels:
+    app.kubernetes.io/name: tether-operator
+    app.kubernetes.io/part-of: tether
+subjects:
+  - kind: ServiceAccount
+    name: tether-operator
+    namespace: tether-system
+roleRef:
+  kind: ClusterRole
+  name: tether-operator
+  apiGroup: rbac.authorization.k8s.io

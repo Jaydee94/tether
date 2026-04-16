@@ -1,0 +1,58 @@
+## Global image settings
+imageRegistry: ghcr.io/jaydee94/tether
+
+## Namespace to deploy tether into
+namespace: tether-system
+
+operator:
+  image:
+    repository: ghcr.io/jaydee94/tether/operator
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  ## Namespace where session-token Secrets are stored
+  tokenNamespace: tether-system
+  leaderElect: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+proxy:
+  image:
+    repository: ghcr.io/jaydee94/tether/proxy
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicas: 1
+  ## Address the proxy listens on inside the container
+  listenAddr: ":8443"
+  ## Upstream Kubernetes API server URL
+  targetAddr: "https://kubernetes.default.svc"
+  ## Directory for audit recordings; uses emptyDir by default
+  auditDir: /var/tether/audit
+  ## Persistent audit volume (optional; set enabled: true to use a PVC)
+  auditPersistence:
+    enabled: false
+    storageClass: ""
+    size: 1Gi
+  tls:
+    ## Name of an existing Secret containing tls.crt and tls.key
+    ## If empty, you must supply the secret manually before deploying.
+    existingSecret: ""
+    ## Alternatively, provide cert/key inline (base64-encoded)
+    cert: ""
+    key: ""
+  tokenNamespace: tether-system
+  service:
+    type: ClusterIP
+    port: 8443
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi

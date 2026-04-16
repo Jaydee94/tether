@@ -1,0 +1,113 @@
+---
+{{- if and .Values.proxy.tls.cert .Values.proxy.tls.key (not .Values.proxy.tls.existingSecret) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tether-proxy-tls
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{ include "tether.proxy.labels" . | nindent 4 }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ .Values.proxy.tls.cert }}
+  tls.key: {{ .Values.proxy.tls.key }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tether-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{ include "tether.proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.proxy.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: tether-proxy
+  template:
+    metadata:
+      labels:
+        {{ include "tether.proxy.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: tether-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      containers:
+        - name: proxy
+          image: "{{ .Values.proxy.image.repository }}:{{ .Values.proxy.image.tag }}"
+          imagePullPolicy: {{ .Values.proxy.image.pullPolicy }}
+          args:
+            - --listen={{ .Values.proxy.listenAddr }}
+            - --target={{ .Values.proxy.targetAddr }}
+            - --audit-dir={{ .Values.proxy.auditDir }}
+            - --tls-cert=/tls/tls.crt
+            - --tls-key=/tls/tls.key
+            - --token-namespace={{ .Values.proxy.tokenNamespace }}
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.proxy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: audit
+              mountPath: {{ .Values.proxy.auditDir }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ include "tether.proxy.tlsSecretName" . }}
+        - name: audit
+          {{- if .Values.proxy.auditPersistence.enabled }}
+          persistentVolumeClaim:
+            claimName: tether-proxy-audit
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tether-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{ include "tether.proxy.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.proxy.service.type }}
+  selector:
+    app.kubernetes.io/name: tether-proxy
+  ports:
+    - name: https
+      port: {{ .Values.proxy.service.port }}
+      targetPort: https
+      protocol: TCP
+{{- if .Values.proxy.auditPersistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tether-proxy-audit
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{ include "tether.proxy.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- if .Values.proxy.auditPersistence.storageClass }}
+  storageClassName: {{ .Values.proxy.auditPersistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.proxy.auditPersistence.size }}
+{{- end }}
