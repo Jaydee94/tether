@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+
+# ── Build stage ────────────────────────────────────────────────────────────────
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /workspace
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/tetherctl ./cmd/tetherctl/...
+
+# ── Runtime stage ──────────────────────────────────────────────────────────────
+# Use busybox so the CLI has a shell environment when run interactively
+FROM busybox:stable-musl
+
+COPY --from=builder /out/tetherctl /usr/local/bin/tetherctl
+
+USER nobody
+ENTRYPOINT ["tetherctl"]

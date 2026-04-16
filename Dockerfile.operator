@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+
+# ── Build stage ────────────────────────────────────────────────────────────────
+FROM golang:1.24-alpine AS builder
+
+WORKDIR /workspace
+
+# Cache dependency downloads separately from source
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source and build a statically linked binary
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags="-s -w" \
+    -o /out/operator ./cmd/operator/...
+
+# ── Runtime stage ──────────────────────────────────────────────────────────────
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /out/operator /operator
+
+USER nonroot:nonroot
+ENTRYPOINT ["/operator"]

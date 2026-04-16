@@ -1,0 +1,33 @@
+# Build artifacts
+bin/
+*.test
+*.out
+
+# Go module cache (not needed in Docker build context)
+vendor/
+
+# IDE / editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment / secrets
+.env
+*.pem
+*.key
+
+# Test coverage output
+coverage.out
+coverage.html
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Helm generated files
+helm/tether/charts/
+helm/tether/*.tgz
+
+# CI artefacts
+.github/
