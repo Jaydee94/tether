@@ -22,6 +22,10 @@ test:
 test-race:
 	go test -race ./... -count=1
 
+## Run E2E tests (requires a running Kubernetes cluster)
+test-e2e:
+	go test -tags=e2e ./tests/e2e/... -v -count=1
+
 ## Lint using golangci-lint (must be installed separately)
 lint:
 	golangci-lint run ./...
