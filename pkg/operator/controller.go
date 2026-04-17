@@ -326,38 +326,6 @@ func (r *TetherLeaseReconciler) handleDeletion(ctx context.Context, lease *tethe
 	return ctrl.Result{}, nil
 }
 
-func (r *TetherLeaseReconciler) createOrUpdateClusterRoleBinding(ctx context.Context, crb *rbacv1.ClusterRoleBinding) error {
-	existing := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, client.ObjectKey{Name: crb.Name}, existing)
-	if errors.IsNotFound(err) {
-		return r.Create(ctx, crb)
-	}
-	if err != nil {
-		return err
-	}
-	existing.RoleRef = crb.RoleRef
-	existing.Subjects = crb.Subjects
-	existing.Labels = crb.Labels
-	existing.Annotations = crb.Annotations
-	return r.Update(ctx, existing)
-}
-
-func (r *TetherLeaseReconciler) createOrUpdateRoleBinding(ctx context.Context, rb *rbacv1.RoleBinding) error {
-	existing := &rbacv1.RoleBinding{}
-	err := r.Get(ctx, client.ObjectKey{Name: rb.Name, Namespace: rb.Namespace}, existing)
-	if errors.IsNotFound(err) {
-		return r.Create(ctx, rb)
-	}
-	if err != nil {
-		return err
-	}
-	existing.RoleRef = rb.RoleRef
-	existing.Subjects = rb.Subjects
-	existing.Labels = rb.Labels
-	existing.Annotations = rb.Annotations
-	return r.Update(ctx, existing)
-}
-
 func (r *TetherLeaseReconciler) createOrUpdateClusterRoleBindingInCluster(ctx context.Context, targetClient client.Client, crb *rbacv1.ClusterRoleBinding) error {
 	existing := &rbacv1.ClusterRoleBinding{}
 	err := targetClient.Get(ctx, client.ObjectKey{Name: crb.Name}, existing)
@@ -403,36 +371,6 @@ func (r *TetherLeaseReconciler) createOrUpdateSecret(ctx context.Context, secret
 	existing.Labels = secret.Labels
 	existing.Annotations = secret.Annotations
 	return r.Update(ctx, existing)
-}
-
-func (r *TetherLeaseReconciler) deleteClusterRoleBinding(ctx context.Context, name string) error {
-	if name == "" {
-		return nil
-	}
-	crb := &rbacv1.ClusterRoleBinding{}
-	err := r.Get(ctx, client.ObjectKey{Name: name}, crb)
-	if errors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("getting ClusterRoleBinding %s: %w", name, err)
-	}
-	return r.Delete(ctx, crb)
-}
-
-func (r *TetherLeaseReconciler) deleteRoleBinding(ctx context.Context, namespace, name string) error {
-	if name == "" || namespace == "" {
-		return nil
-	}
-	rb := &rbacv1.RoleBinding{}
-	err := r.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, rb)
-	if errors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("getting RoleBinding %s/%s: %w", namespace, name, err)
-	}
-	return r.Delete(ctx, rb)
 }
 
 func (r *TetherLeaseReconciler) deleteClusterRoleBindingInCluster(ctx context.Context, targetClient client.Client, name string) error {
