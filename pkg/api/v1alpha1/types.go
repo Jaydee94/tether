@@ -9,6 +9,7 @@ import (
 // +kubebuilder:resource:scope=Cluster,shortName=tl
 // +kubebuilder:printcolumn:name="User",type=string,JSONPath=`.spec.user`
 // +kubebuilder:printcolumn:name="Role",type=string,JSONPath=`.spec.role`
+// +kubebuilder:printcolumn:name="Cluster",type=string,JSONPath=`.status.cluster`
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.status.expiresAt`
 
@@ -32,6 +33,11 @@ type TetherLeaseSpec struct {
 	// +optional
 	Namespace string   `json:"namespace,omitempty"`
 	Approvers []string `json:"approvers,omitempty"`
+	// Cluster is the target cluster name for this lease.
+	// When set, the operator creates RBAC bindings in the named cluster.
+	// When empty (default), the operator uses the default/local cluster (backward compatible).
+	// +optional
+	Cluster string `json:"cluster,omitempty"`
 }
 
 // TetherLeaseStatus defines the observed state of TetherLease.
@@ -49,6 +55,10 @@ type TetherLeaseStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// Cluster is the resolved target cluster name where the RBAC binding was created.
+	// Used for cleanup during lease expiry/revocation.
+	// +optional
+	Cluster string `json:"cluster,omitempty"`
 }
 
 // TetherLeasePhase describes the lifecycle phase of a TetherLease.

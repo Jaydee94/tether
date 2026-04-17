@@ -36,6 +36,7 @@ func main() {
 		devToken           string
 		devSessionID       string
 		devMode            bool
+		clusterConfig      string
 	)
 
 	opts := zap.Options{Development: true}
@@ -50,6 +51,7 @@ func main() {
 	flag.StringVar(&tlsCertFile, "tls-cert", "", "Path to TLS certificate file for the proxy listener.")
 	flag.StringVar(&tlsKeyFile, "tls-key", "", "Path to TLS key file for the proxy listener.")
 	flag.StringVar(&tokenNamespace, "token-namespace", "tether-system", "Namespace where session-token Secrets are stored.")
+	flag.StringVar(&clusterConfig, "cluster-config", "", "Path to multi-cluster YAML config. If unset, runs in single-cluster mode.")
 	// Dev-mode flags: if both are set, fall back to a static single-token validator (useful in CI/testing).
 	flag.StringVar(&devToken, "dev-token", os.Getenv("TETHER_TOKEN"), "Dev-only static token (overrides k8s-backed validation).")
 	flag.StringVar(&devSessionID, "dev-session-id", os.Getenv("TETHER_SESSION_ID"), "Session ID paired with --dev-token.")
@@ -99,15 +101,18 @@ func main() {
 		validator = proxy.NewKubernetesLeaseValidator(kubeClient, dynClient, tokenNamespace)
 	}
 
-	p, err := proxy.NewTetherProxy(targetAddr, backend, validator, tlsSkipVerify, upstreamTransport)
+	// Multi-cluster support: wire cluster registry
+	clusterResolver, err := proxy.NewFileBasedClusterResolver(clusterConfig)
 	if err != nil {
-		log.Error(err, "Failed to create proxy")
+		log.Error(err, "Failed to initialize cluster registry", "clusterConfig", clusterConfig)
 		os.Exit(1)
 	}
+	// Always use MultiClusterProxy for consolidation
+	p := proxy.NewMultiClusterProxy(nil, clusterResolver, backend, validator, tlsSkipVerify, upstreamTransport)
 
 	srv := &http.Server{
 		Addr:              listenAddr,
-		Handler:           p.Handler(),
+		Handler:           p, // MultiClusterProxy implements http.Handler
 		ReadHeaderTimeout: 30 * time.Second,
 	}
 

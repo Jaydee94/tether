@@ -74,6 +74,7 @@ func newRequestCmd() *cobra.Command {
 		reason    string
 		name      string
 		namespace string
+		cluster   string
 	)
 
 	cmd := &cobra.Command{
@@ -81,6 +82,9 @@ func newRequestCmd() *cobra.Command {
 		Short: "Request a new TetherLease for privileged access",
 		Example: `  # Request cluster-admin access for 30 minutes
   tetherctl request --role cluster-admin --for 30m --reason "investigating outage"
+
+  # Request access to a specific cluster
+  tetherctl request --role cluster-admin --for 30m --cluster prod-us-west-2 --reason "prod incident"
 
   # Request namespace-scoped access (creates a RoleBinding in 'dev')
   tetherctl request --role developer --for 1h --namespace dev --reason "deploying hotfix"`,
@@ -120,6 +124,9 @@ func newRequestCmd() *cobra.Command {
 			if namespace != "" {
 				spec["namespace"] = namespace
 			}
+			if cluster != "" {
+				spec["cluster"] = cluster
+			}
 
 			lease := &unstructured.Unstructured{
 				Object: map[string]interface{}{
@@ -139,6 +146,9 @@ func newRequestCmd() *cobra.Command {
 
 			fmt.Printf("TetherLease %q created.\n", created.GetName())
 			fmt.Printf("User: %s | Role: %s | Duration: %s\n", user, role, duration)
+			if cluster != "" {
+				fmt.Printf("Cluster: %s\n", cluster)
+			}
 			if namespace != "" {
 				fmt.Printf("Scope: namespace %q (RoleBinding)\n", namespace)
 			} else {
@@ -159,6 +169,7 @@ func newRequestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&reason, "reason", "", "Human-readable reason for the access request")
 	cmd.Flags().StringVar(&name, "name", "", "Name for the TetherLease (defaults to <user>-<timestamp>)")
 	cmd.Flags().StringVar(&namespace, "namespace", "", "Namespace to scope the binding to (omit for cluster-wide ClusterRoleBinding)")
+	cmd.Flags().StringVar(&cluster, "cluster", "", "Target cluster name (omit for default/local cluster)")
 	return cmd
 }
 
