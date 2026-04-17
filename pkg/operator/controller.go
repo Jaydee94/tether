@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"github.com/prometheus/client_golang/prometheus"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -69,7 +69,6 @@ func init() {
 	)
 }
 
-
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=tether.dev,resources=tetherleases/finalizers,verbs=update
@@ -80,8 +79,9 @@ func init() {
 // TetherLeaseReconciler reconciles TetherLease objects.
 type TetherLeaseReconciler struct {
 	client.Client
-	Scheme         *runtime.Scheme
-	TokenNamespace string // namespace in which session-token Secrets are stored
+	Scheme          *runtime.Scheme
+	TokenNamespace  string // namespace in which session-token Secrets are stored
+	ClusterRegistry ClusterRegistry
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -157,20 +157,40 @@ func (r *TetherLeaseReconciler) activateLease(ctx context.Context, lease *tether
 		return ctrl.Result{}, err
 	}
 
+	// Resolve target cluster
+	clusterName := lease.Spec.Cluster
+	if clusterName == "" {
+		clusterName = "local"
+	}
+
+	var targetClient client.Client
+	if r.ClusterRegistry != nil {
+		clusterClient, err := r.ClusterRegistry.GetCluster(ctx, clusterName)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("getting cluster %q: %w", clusterName, err)
+		}
+		targetClient = clusterClient.Client
+		logger.Info("Creating binding in target cluster", "cluster", clusterName, "lease", lease.Name)
+	} else {
+		// Backward compatibility: no cluster registry means single-cluster mode
+		targetClient = r.Client
+		clusterName = "local"
+	}
+
 	bindingName := bindingPrefix + lease.Name
 	if lease.Spec.Namespace != "" {
 		rb := r.buildRoleBinding(lease, bindingName)
-		if err := r.createOrUpdateRoleBinding(ctx, rb); err != nil {
+		if err := r.createOrUpdateRoleBindingInCluster(ctx, targetClient, rb); err != nil {
 			return ctrl.Result{}, err
 		}
 	} else {
 		crb := r.buildClusterRoleBinding(lease, bindingName)
-		if err := r.createOrUpdateClusterRoleBinding(ctx, crb); err != nil {
+		if err := r.createOrUpdateClusterRoleBindingInCluster(ctx, targetClient, crb); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
 
-	// Generate and store a session token.
+	// Generate and store a session token in the control plane cluster
 	secretName := tokenPrefix + lease.Name
 	token, err := generateSessionToken()
 	if err != nil {
@@ -186,6 +206,7 @@ func (r *TetherLeaseReconciler) activateLease(ctx context.Context, lease *tether
 	lease.Status.ExpiresAt = &expiresAt
 	lease.Status.BindingName = bindingName
 	lease.Status.TokenSecret = secretName
+	lease.Status.Cluster = clusterName
 
 	if err := r.Status().Update(ctx, lease); err != nil {
 		return ctrl.Result{}, err
@@ -193,10 +214,9 @@ func (r *TetherLeaseReconciler) activateLease(ctx context.Context, lease *tether
 
 	leaseActivationsTotal.Inc()
 	activeLeases.Inc()
-	logger.Info("Lease activated", "lease", lease.Name, "expiresAt", expiresAt.Time, "tokenSecret", secretName)
+	logger.Info("Lease activated", "lease", lease.Name, "cluster", clusterName, "expiresAt", expiresAt.Time, "tokenSecret", secretName)
 	return ctrl.Result{RequeueAfter: duration}, nil
 }
-
 
 // reconcilePendingApproval watches for an approver to set status.approvedBy or status.deniedBy.
 func (r *TetherLeaseReconciler) reconcilePendingApproval(ctx context.Context, lease *tetherv1alpha1.TetherLease) (ctrl.Result, error) {
@@ -338,6 +358,38 @@ func (r *TetherLeaseReconciler) createOrUpdateRoleBinding(ctx context.Context, r
 	return r.Update(ctx, existing)
 }
 
+func (r *TetherLeaseReconciler) createOrUpdateClusterRoleBindingInCluster(ctx context.Context, targetClient client.Client, crb *rbacv1.ClusterRoleBinding) error {
+	existing := &rbacv1.ClusterRoleBinding{}
+	err := targetClient.Get(ctx, client.ObjectKey{Name: crb.Name}, existing)
+	if errors.IsNotFound(err) {
+		return targetClient.Create(ctx, crb)
+	}
+	if err != nil {
+		return err
+	}
+	existing.RoleRef = crb.RoleRef
+	existing.Subjects = crb.Subjects
+	existing.Labels = crb.Labels
+	existing.Annotations = crb.Annotations
+	return targetClient.Update(ctx, existing)
+}
+
+func (r *TetherLeaseReconciler) createOrUpdateRoleBindingInCluster(ctx context.Context, targetClient client.Client, rb *rbacv1.RoleBinding) error {
+	existing := &rbacv1.RoleBinding{}
+	err := targetClient.Get(ctx, client.ObjectKey{Name: rb.Name, Namespace: rb.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		return targetClient.Create(ctx, rb)
+	}
+	if err != nil {
+		return err
+	}
+	existing.RoleRef = rb.RoleRef
+	existing.Subjects = rb.Subjects
+	existing.Labels = rb.Labels
+	existing.Annotations = rb.Annotations
+	return targetClient.Update(ctx, existing)
+}
+
 func (r *TetherLeaseReconciler) createOrUpdateSecret(ctx context.Context, secret *corev1.Secret) error {
 	existing := &corev1.Secret{}
 	err := r.Get(ctx, client.ObjectKey{Name: secret.Name, Namespace: secret.Namespace}, existing)
@@ -383,12 +435,61 @@ func (r *TetherLeaseReconciler) deleteRoleBinding(ctx context.Context, namespace
 	return r.Delete(ctx, rb)
 }
 
+func (r *TetherLeaseReconciler) deleteClusterRoleBindingInCluster(ctx context.Context, targetClient client.Client, name string) error {
+	if name == "" {
+		return nil
+	}
+	crb := &rbacv1.ClusterRoleBinding{}
+	err := targetClient.Get(ctx, client.ObjectKey{Name: name}, crb)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting ClusterRoleBinding %s: %w", name, err)
+	}
+	return targetClient.Delete(ctx, crb)
+}
+
+func (r *TetherLeaseReconciler) deleteRoleBindingInCluster(ctx context.Context, targetClient client.Client, namespace, name string) error {
+	if name == "" || namespace == "" {
+		return nil
+	}
+	rb := &rbacv1.RoleBinding{}
+	err := targetClient.Get(ctx, client.ObjectKey{Name: name, Namespace: namespace}, rb)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("getting RoleBinding %s/%s: %w", namespace, name, err)
+	}
+	return targetClient.Delete(ctx, rb)
+}
+
 // deleteBinding deletes either a RoleBinding or ClusterRoleBinding depending on the lease spec.
 func (r *TetherLeaseReconciler) deleteBinding(ctx context.Context, lease *tetherv1alpha1.TetherLease) error {
-	if lease.Spec.Namespace != "" {
-		return r.deleteRoleBinding(ctx, lease.Spec.Namespace, lease.Status.BindingName)
+	// Resolve target cluster for deletion
+	clusterName := lease.Status.Cluster
+	if clusterName == "" {
+		clusterName = "local"
 	}
-	return r.deleteClusterRoleBinding(ctx, lease.Status.BindingName)
+
+	var targetClient client.Client
+	if r.ClusterRegistry != nil {
+		clusterClient, err := r.ClusterRegistry.GetCluster(ctx, clusterName)
+		if err != nil {
+			// If the target cluster is unreachable, log the error but don't fail
+			// The lease will be retried via the reconcile queue
+			return fmt.Errorf("getting cluster %q for binding deletion: %w", clusterName, err)
+		}
+		targetClient = clusterClient.Client
+	} else {
+		targetClient = r.Client
+	}
+
+	if lease.Spec.Namespace != "" {
+		return r.deleteRoleBindingInCluster(ctx, targetClient, lease.Spec.Namespace, lease.Status.BindingName)
+	}
+	return r.deleteClusterRoleBindingInCluster(ctx, targetClient, lease.Status.BindingName)
 }
 
 func (r *TetherLeaseReconciler) deleteTokenSecret(ctx context.Context, name string) error {

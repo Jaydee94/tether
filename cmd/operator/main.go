@@ -34,12 +34,14 @@ func main() {
 		probeAddr            string
 		enableLeaderElection bool
 		tokenNamespace       string
+		clusterConfigPath    string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	flag.StringVar(&tokenNamespace, "token-namespace", "tether-system", "Namespace where session-token Secrets are stored.")
+	flag.StringVar(&clusterConfigPath, "cluster-config", "", "Path to multi-cluster configuration file (optional, defaults to single-cluster mode).")
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -58,10 +60,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize ClusterRegistry
+	var clusterRegistry operator.ClusterRegistry
+	if clusterConfigPath != "" {
+		clusterRegistry, err = operator.NewClusterRegistry(clusterConfigPath, mgr.GetScheme())
+		if err != nil {
+			setupLog.Error(err, "unable to create cluster registry", "configPath", clusterConfigPath)
+			os.Exit(1)
+		}
+		setupLog.Info("Multi-cluster mode enabled", "configPath", clusterConfigPath)
+	} else {
+		// Single-cluster mode (backward compatible)
+		clusterRegistry, err = operator.NewClusterRegistry("", mgr.GetScheme())
+		if err != nil {
+			setupLog.Error(err, "unable to create single-cluster registry")
+			os.Exit(1)
+		}
+		setupLog.Info("Single-cluster mode (default)")
+	}
+
 	if err := (&operator.TetherLeaseReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		TokenNamespace: tokenNamespace,
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		TokenNamespace:  tokenNamespace,
+		ClusterRegistry: clusterRegistry,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "TetherLease")
 		os.Exit(1)
