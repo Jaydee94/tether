@@ -1,5 +1,6 @@
 bin/
 *.cast
+.env
 # Squad: ignore runtime state (logs, inbox, sessions)
 .squad/orchestration-log/
 .squad/log/
