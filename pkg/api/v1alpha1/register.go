@@ -1,7 +1,6 @@
 package v1alpha1
 
 import (
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
@@ -24,10 +23,4 @@ func Resource(resource string) schema.GroupResource {
 // Kind returns a GroupKind for the given kind name.
 func Kind(kind string) schema.GroupKind {
 	return schema.GroupKind{Group: GroupVersion.Group, Kind: kind}
-}
-
-// addKnownTypes adds our types to the scheme.
-func addKnownTypes(s *runtime.Scheme) error {
-	s.AddKnownTypes(GroupVersion, &TetherLease{}, &TetherLeaseList{})
-	return nil
 }

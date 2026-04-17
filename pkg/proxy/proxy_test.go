@@ -15,7 +15,7 @@ import (
 func TestStaticValidator(t *testing.T) {
 	v := NewStaticValidator(map[string]string{"tok1": "sess1"})
 
-	sid, err := v.Validate(nil, "tok1")
+	sid, err := v.Validate(context.TODO(), "tok1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestStaticValidator(t *testing.T) {
 		t.Errorf("expected sess1, got %q", sid)
 	}
 
-	_, err = v.Validate(nil, "bad-token")
+	_, err = v.Validate(context.TODO(), "bad-token")
 	if err == nil {
 		t.Error("expected error for unknown token")
 	}
