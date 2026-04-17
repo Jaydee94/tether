@@ -708,6 +708,64 @@ kubectl apply -f deploy/servicemonitor-proxy.yaml
 
 Both expect the respective Kubernetes `Service` to expose a port named `metrics` pointing to the metrics address. Adjust the `namespace` and `selector` labels as needed for your deployment.
 
+### Health Check Endpoints
+
+Both components expose liveness and readiness probe endpoints for Kubernetes health checks:
+
+**Operator:**
+- Liveness: `:8081/healthz`
+- Readiness: `:8081/readyz`
+
+**Proxy:**
+- Liveness: `:9090/healthz`
+- Readiness: `:9090/readyz`
+
+Example Kubernetes probe configuration:
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: 8081
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: 8081
+  initialDelaySeconds: 5
+  periodSeconds: 10
+```
+
+### Grafana Dashboards
+
+A comprehensive Grafana dashboard is provided in `deploy/dashboards/tether-overview.json` that visualizes:
+
+- **Lease lifecycle events** — activation, expiration, and revocation rates
+- **Active leases** — current count with threshold indicators
+- **Proxy request rates** — by HTTP status code
+- **Request latencies** — p50, p90, and p99 percentiles
+- **Token validation errors** — rate and total count
+
+#### Installing the dashboard
+
+**Option 1: Import directly into Grafana**
+
+1. Navigate to Dashboards → Import in the Grafana UI
+2. Upload `deploy/dashboards/tether-overview.json`
+3. Select your Prometheus datasource
+
+**Option 2: Deploy as ConfigMap (with Grafana sidecar)**
+
+If your Grafana deployment uses the [grafana-dashboard-sidecar](https://github.com/grafana/helm-charts/tree/main/charts/grafana#sidecar-for-dashboards), deploy the ConfigMap:
+
+```bash
+kubectl apply -f deploy/dashboard-configmap.yaml
+```
+
+The dashboard will be automatically discovered and loaded by Grafana.
+
 ---
 
 ## Changelog

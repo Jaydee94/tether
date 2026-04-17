@@ -113,9 +113,17 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	// Start metrics server
+	// Start metrics server with health checks
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
+	metricsMux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	})
 	metricsSrv := &http.Server{
 		Addr:              metricsAddr,
 		Handler:           metricsMux,
